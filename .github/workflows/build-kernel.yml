@@ -129,11 +129,6 @@ jobs:
 
     # ------------------------------------------------------------------
     # 4b. Fix broken Kconfig references in socrates-t-oss
-    #
-    # Root cause: drivers/misc/Kconfig references drivers/misc/hwid/Kconfig
-    # but that file is not released in the OSS kernel tree.
-    # Fix: comment out the reference AND create a minimal stub file.
-    # Using printf instead of heredoc to avoid YAML syntax issues.
     # ------------------------------------------------------------------
     - name: Fix missing drivers/misc/hwid/Kconfig (Xiaomi proprietary stub)
       working-directory: kernel_src
@@ -159,12 +154,10 @@ jobs:
           '    help' \
           '      Stub for OSS builds. Set to n.' \
           > drivers/misc/hwid/Kconfig
-        echo "==> Created stub drivers/misc/hwid/Kconfig"
 
         printf '%s\n' \
           'obj-$(CONFIG_HWID) += hwid.o' \
           > drivers/misc/hwid/Makefile
-        echo "==> Created stub drivers/misc/hwid/Makefile"
 
         printf '%s\n' \
           '// SPDX-License-Identifier: GPL-2.0' \
@@ -173,13 +166,9 @@ jobs:
           'MODULE_LICENSE("GPL v2");' \
           'MODULE_DESCRIPTION("Xiaomi HWID stub");' \
           > drivers/misc/hwid/hwid.c
-        echo "==> Created stub drivers/misc/hwid/hwid.c"
 
-        echo "==> Verification:"
-        echo "--- drivers/misc/hwid/Kconfig ---"
+        echo "==> hwid stub created. Verification:"
         cat drivers/misc/hwid/Kconfig
-        echo "--- grep hwid in drivers/misc/Kconfig ---"
-        grep -n 'hwid' drivers/misc/Kconfig || echo "  (hwid references removed)"
 
     # ------------------------------------------------------------------
     # 5. Integrate SukiSU-Ultra
@@ -193,12 +182,9 @@ jobs:
         cd KernelSU
         git checkout "$SUKISU_REF" 2>/dev/null || true
         echo "==> SukiSU: $(git log --oneline -1)"
-        echo "==> Version: $(cat version 2>/dev/null || echo unknown)"
         cd ..
 
         DRIVER_DIR="$(pwd)/drivers"
-        [ -d "$DRIVER_DIR" ] || { echo "ERROR: drivers/ not found!"; ls -la; exit 1; }
-
         ln -sf "$(realpath --relative-to="$DRIVER_DIR" "$(pwd)/KernelSU/kernel")" \
           "$DRIVER_DIR/kernelsu"
 
@@ -255,7 +241,7 @@ jobs:
           echo "==> After consolidate: $(wc -l < out/.config) lines"
         fi
 
-        echo "==> Step C: appending SukiSU/SUSFS + KPM"
+        echo "==> Step C: appending SukiSU/SUSFS + KPM + vendor data"
         cat ../builder/configs/sukisu_susfs.config >> out/.config
         echo "# CONFIG_HWID is not set" >> out/.config
         [ "$ENABLE_KPM" = "true" ] && echo 'CONFIG_KPM=y' >> out/.config
@@ -271,14 +257,14 @@ jobs:
           LLVM_IAS=1 \
           CROSS_COMPILE=aarch64-linux-gnu- \
           olddefconfig 2>&1 | tee /tmp/olddefconfig.log || {
-          echo "==> WARNING: olddefconfig non-zero exit — checking .config..."
+          echo "==> WARNING: olddefconfig non-zero exit"
           [ -f out/.config ] || { echo "ERROR: no .config generated!"; exit 1; }
           echo "==> .config exists ($(wc -l < out/.config) lines), continuing."
         }
 
         echo
-        echo "==> Final .config ($(wc -l < out/.config) lines). Key values:"
-        grep -E 'CONFIG_KSU=|CONFIG_SUSFS=|CONFIG_KPM=|CONFIG_KALLSYMS_ALL=|CONFIG_SCHED_WALT=|CONFIG_HZ=|CONFIG_PREEMPT=|CONFIG_TCP_CONG_BBR=|CONFIG_MQ_IOSCHED_KYBER=' \
+        echo "==> Final .config key values:"
+        grep -E 'CONFIG_KSU=|CONFIG_SUSFS=|CONFIG_KPM=|CONFIG_KALLSYMS_ALL=|CONFIG_ANDROID_VENDOR_OEM_DATA=|CONFIG_ANDROID_VENDOR_HOOKS=|CONFIG_SCHED_WALT=|CONFIG_HZ=|CONFIG_PREEMPT=' \
           out/.config 2>/dev/null || true
 
     # ------------------------------------------------------------------
@@ -292,6 +278,7 @@ jobs:
         export KBUILD_BUILD_HOST="github-actions"
 
         echo "==> Starting kernel build (jobs: $JOBS)..."
+        set -o pipefail
         make O=out \
           ARCH=$ARCH \
           CC="ccache clang" \
@@ -300,12 +287,20 @@ jobs:
           CROSS_COMPILE=aarch64-linux-gnu- \
           -j$JOBS \
           2>&1 | tee /tmp/build.log
+        BUILD_EXIT=${PIPESTATUS[0]}
 
-        if [ ! -f out/arch/arm64/boot/Image ]; then
-          echo "==> ERROR: Image not found! Last 80 lines:"
-          tail -80 /tmp/build.log
+        if [ $BUILD_EXIT -ne 0 ] || [ ! -f out/arch/arm64/boot/Image ]; then
+          echo
+          echo "==> BUILD FAILED (exit $BUILD_EXIT). Showing ALL compiler errors:"
+          echo "--- grep error: ---"
+          grep -n ': error:' /tmp/build.log | head -60 || true
+          echo "--- grep fatal: ---"
+          grep -n ': fatal error:' /tmp/build.log | head -20 || true
+          echo "--- Last 40 lines of build.log ---"
+          tail -40 /tmp/build.log
           exit 1
         fi
+
         echo "==> Build SUCCESS: $(ls -lh out/arch/arm64/boot/Image)"
         find out/arch/arm64/boot -name '*.dtb'    2>/dev/null | head -5 || true
         find out/arch/arm64/boot -name 'dtbo.img' 2>/dev/null | head -3 || true
