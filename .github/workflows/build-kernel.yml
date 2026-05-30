@@ -20,9 +20,9 @@ on:
         required: true
         default: 'susfs-main'
       SUSFS_BRANCH:
-        description: 'SUSFS kernel branch'
+        description: 'SUSFS kernel branch (gki-android13-5.10 for socrates/Android13)'
         required: true
-        default: 'kernel-5.10'
+        default: 'gki-android13-5.10'
       ENABLE_KPM:
         description: 'Enable KPM (Kernel Patch Module) support'
         required: false
@@ -39,12 +39,14 @@ env:
   SUKISU_REF: ${{ github.event.inputs.SUKISU_REF || 'susfs-main' }}
 
   # ---- SUSFS -----------------------------------------------------------
+  # Correct branch names in simonpunk/susfs4ksu:
+  #   Android 13 + 5.10 kernel  -> gki-android13-5.10   (socrates)
+  #   Android 12 + 5.10 kernel  -> gki-android12-5.10
+  #   Android 13 + 5.15 kernel  -> gki-android13-5.15
   SUSFS_REPO: https://gitlab.com/simonpunk/susfs4ksu.git
-  SUSFS_BRANCH: ${{ github.event.inputs.SUSFS_BRANCH || 'kernel-5.10' }}
+  SUSFS_BRANCH: ${{ github.event.inputs.SUSFS_BRANCH || 'gki-android13-5.10' }}
 
   # ---- Toolchain -------------------------------------------------------
-  CLANG_URL: https://github.com/Neutron-Toolchains/clang-build-catalogue/releases/download/latest/neutron-clang-latest.tar.zst
-  # Fallback: use AOSP clang from android.googlesource if Neutron fails
   AOSP_CLANG_VER: r522817
 
   # ---- Build options ---------------------------------------------------
@@ -77,7 +79,7 @@ jobs:
           git bc bison flex libssl-dev make python3 python3-pip \
           zip unzip libncurses-dev device-tree-compiler ccache \
           libelf-dev dwarves zstd curl wget ca-certificates \
-          lld llvm binutils-aarch64-linux-gnu
+          lld llvm binutils-aarch64-linux-gnu patch
         echo "CCACHE_DIR=$HOME/.ccache" >> $GITHUB_ENV
         echo "USE_CCACHE=1" >> $GITHUB_ENV
 
@@ -96,7 +98,7 @@ jobs:
       uses: actions/cache@v4
       with:
         path: ~/clang
-        key: neutron-clang-latest-v1
+        key: neutron-clang-latest-v2
 
     # ------------------------------------------------------------------
     # 3. Download Neutron Clang (with AOSP fallback)
@@ -106,19 +108,20 @@ jobs:
       run: |
         mkdir -p ~/clang
         echo "==> Trying Neutron Clang..."
-        if curl -fL --retry 3 \
-          "https://github.com/Neutron-Toolchains/clang-build-catalogue/releases/download/latest/neutron-clang-latest.tar.zst" \
-          -o /tmp/neutron-clang.tar.zst 2>/dev/null; then
+        NEUTRON_URL="https://github.com/Neutron-Toolchains/clang-build-catalogue/releases/download/latest/neutron-clang-latest.tar.zst"
+        if curl -fL --retry 3 --connect-timeout 30 "$NEUTRON_URL" \
+            -o /tmp/neutron-clang.tar.zst 2>/dev/null; then
           echo "==> Extracting Neutron Clang..."
           tar --use-compress-program=zstd -xf /tmp/neutron-clang.tar.zst -C ~/clang
           echo "CLANG_SOURCE=neutron" >> $GITHUB_ENV
         else
-          echo "==> Neutron Clang unavailable, falling back to AOSP Clang r522817..."
+          echo "==> Neutron unavailable, falling back to AOSP Clang ${AOSP_CLANG_VER}..."
           AOSP_URL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-${AOSP_CLANG_VER}.tar.gz"
           curl -fL --retry 3 "$AOSP_URL" -o /tmp/aosp-clang.tar.gz
           tar -xf /tmp/aosp-clang.tar.gz -C ~/clang
           echo "CLANG_SOURCE=aosp" >> $GITHUB_ENV
         fi
+        echo "==> Clang binary found:"
         ls ~/clang/bin/clang* | head -3
 
     - name: Set Clang PATH
@@ -147,26 +150,24 @@ jobs:
       run: |
         echo "==> Integrating SukiSU-Ultra (ref: $SUKISU_REF)..."
 
-        # Clone SukiSU into KernelSU/
+        # Clone SukiSU — try requested branch/tag, fall back to default branch
         git clone --depth=1 \
           --branch "$SUKISU_REF" \
           "$SUKISU_REPO" \
           KernelSU 2>/dev/null || \
         git clone --depth=1 "$SUKISU_REPO" KernelSU
 
-        # Try to checkout the requested ref
         cd KernelSU
         git checkout "$SUKISU_REF" 2>/dev/null || true
         echo "==> SukiSU HEAD: $(git log --oneline -1)"
         echo "==> SukiSU version: $(cat version 2>/dev/null || echo 'unknown')"
         cd ..
 
-        # Locate drivers/ directory (non-GKI layout: kernel_src/drivers)
+        # Locate drivers/ directory (non-GKI layout)
         DRIVER_DIR="$(pwd)/drivers"
         if [ ! -d "$DRIVER_DIR" ]; then
           echo "ERROR: drivers/ not found in kernel root!"
-          ls -la
-          exit 1
+          ls -la; exit 1
         fi
 
         # Symlink KernelSU/kernel -> drivers/kernelsu
@@ -176,7 +177,7 @@ jobs:
 
         # Patch drivers/Makefile
         if ! grep -q 'kernelsu' "$DRIVER_DIR/Makefile"; then
-          echo $'\nobj-$(CONFIG_KSU) += kernelsu/' >> "$DRIVER_DIR/Makefile"
+          printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> "$DRIVER_DIR/Makefile"
           echo "==> Patched drivers/Makefile"
         fi
 
@@ -189,28 +190,39 @@ jobs:
         echo "==> SukiSU-Ultra integration complete."
 
     # ------------------------------------------------------------------
-    # 6. Apply SUSFS patches
+    # 6. Clone SUSFS and apply patches
+    #    Branch naming in simonpunk/susfs4ksu:
+    #      gki-android13-5.10  <- socrates (Android 13, kernel 5.10)
+    #      gki-android12-5.10
+    #      gki-android13-5.15
+    #      gki-android14-5.15  etc.
     # ------------------------------------------------------------------
     - name: Clone SUSFS and apply patches
       run: |
-        echo "==> Cloning SUSFS ($SUSFS_BRANCH)..."
+        echo "==> Cloning SUSFS branch: $SUSFS_BRANCH ..."
         git clone --depth=1 \
           --branch "$SUSFS_BRANCH" \
           "$SUSFS_REPO" \
           susfs4ksu
 
-        echo "==> Copying SUSFS VFS files into kernel..."
-        # Copy fs-side sources
-        cp -v susfs4ksu/kernel_patches/fs/susfs.c     kernel_src/fs/ 2>/dev/null || true
-        cp -v susfs4ksu/kernel_patches/fs/sus_path.c  kernel_src/fs/ 2>/dev/null || true
-        cp -v susfs4ksu/kernel_patches/fs/sus_proc.c  kernel_src/fs/ 2>/dev/null || true
-        cp -v susfs4ksu/kernel_patches/fs/sus_su.c    kernel_src/fs/ 2>/dev/null || true
-        ls susfs4ksu/kernel_patches/fs/ | xargs -I{} cp -v susfs4ksu/kernel_patches/fs/{} kernel_src/fs/ 2>/dev/null || true
+        echo "==> SUSFS branch content (kernel_patches/):"
+        ls susfs4ksu/kernel_patches/ || true
+
+        echo "==> Copying SUSFS VFS source files into kernel..."
+        # Copy every .c file from fs/
+        if [ -d susfs4ksu/kernel_patches/fs ]; then
+          for f in susfs4ksu/kernel_patches/fs/*.c; do
+            [ -f "$f" ] && cp -v "$f" kernel_src/fs/ || true
+          done
+        fi
 
         # Copy header files
-        mkdir -p kernel_src/include/linux
-        ls susfs4ksu/kernel_patches/include/linux/ | \
-          xargs -I{} cp -v susfs4ksu/kernel_patches/include/linux/{} kernel_src/include/linux/ 2>/dev/null || true
+        if [ -d susfs4ksu/kernel_patches/include/linux ]; then
+          mkdir -p kernel_src/include/linux
+          for f in susfs4ksu/kernel_patches/include/linux/*.h; do
+            [ -f "$f" ] && cp -v "$f" kernel_src/include/linux/ || true
+          done
+        fi
 
         echo "==> Running SUSFS patch applier script..."
         bash builder/scripts/apply_susfs.sh kernel_src susfs4ksu
@@ -223,28 +235,31 @@ jobs:
         bash builder/scripts/apply_scheduler_opts.sh kernel_src "$ENABLE_KPM"
 
     # ------------------------------------------------------------------
-    # 8. Apply KConfig fragment (SukiSU + SUSFS)
+    # 8. Merge KConfig fragment (SukiSU + SUSFS) into defconfig
     # ------------------------------------------------------------------
     - name: Merge KConfig fragment into defconfig
       working-directory: kernel_src
       run: |
-        DEFCONFIG_PATH="arch/arm64/configs/$KERNEL_DEFCONFIG"
+        # Try multiple known defconfig paths for socrates
+        DEFCONFIG_PATH=""
+        for candidate in \
+          "arch/arm64/configs/vendor/socrates_defconfig" \
+          "arch/arm64/configs/socrates_defconfig" \
+          "arch/arm64/configs/vendor/lahaina_defconfig"; do
+          if [ -f "$candidate" ]; then
+            DEFCONFIG_PATH="$candidate"
+            break
+          fi
+        done
 
-        # Find defconfig (try vendor/socrates, then generic socrates)
-        if [ ! -f "$DEFCONFIG_PATH" ]; then
-          DEFCONFIG_PATH="arch/arm64/configs/socrates_defconfig"
-        fi
-        if [ ! -f "$DEFCONFIG_PATH" ]; then
-          # Fallback: list available defconfigs
-          echo "==> WARNING: socrates_defconfig not found. Available defconfigs:"
-          ls arch/arm64/configs/ | grep -i socra || ls arch/arm64/configs/ | head -20
-          DEFCONFIG_PATH=$(ls arch/arm64/configs/ | grep -i socra | head -1)
+        if [ -z "$DEFCONFIG_PATH" ]; then
+          echo "==> WARNING: socrates_defconfig not found, searching..."
+          DEFCONFIG_PATH=$(find arch/arm64/configs -name '*socrat*' 2>/dev/null | head -1)
           if [ -z "$DEFCONFIG_PATH" ]; then
-            echo "==> Using first available vendor defconfig..."
-            DEFCONFIG_PATH=$(ls arch/arm64/configs/vendor/ 2>/dev/null | head -1)
-            DEFCONFIG_PATH="arch/arm64/configs/vendor/$DEFCONFIG_PATH"
-          else
-            DEFCONFIG_PATH="arch/arm64/configs/$DEFCONFIG_PATH"
+            echo "==> Available defconfigs:"
+            find arch/arm64/configs -name '*.config' -o -name '*defconfig' | head -20
+            echo "ERROR: Cannot find defconfig for socrates!"
+            exit 1
           fi
         fi
 
@@ -262,13 +277,13 @@ jobs:
         fi
 
     # ------------------------------------------------------------------
-    # 9. Configure kernel
+    # 9. Configure kernel (make defconfig + olddefconfig)
     # ------------------------------------------------------------------
     - name: Configure kernel (make defconfig + olddefconfig)
       working-directory: kernel_src
       run: |
         export PATH="$HOME/clang/bin:$PATH"
-        BASENAME=$(basename $DEFCONFIG_PATH)
+        BASENAME=$(basename "$DEFCONFIG_PATH")
 
         make O=out \
           ARCH=$ARCH \
@@ -286,9 +301,9 @@ jobs:
           CROSS_COMPILE=aarch64-linux-gnu- \
           olddefconfig
 
-        echo "==> Final KSU/SUSFS config values:"
-        grep -E 'CONFIG_KSU|CONFIG_SUSFS|CONFIG_KPM|CONFIG_KALLSYMS|CONFIG_SCHED|CONFIG_HZ|CONFIG_PREEMPT' \
-          out/.config | head -40
+        echo "==> Final KSU/SUSFS/Scheduler config values:"
+        grep -E 'CONFIG_KSU|CONFIG_SUSFS|CONFIG_KPM|CONFIG_KALLSYMS|CONFIG_SCHED_WALT|CONFIG_HZ=|CONFIG_PREEMPT=|CONFIG_TCP_CONG_BBR|CONFIG_MQ_IOSCHED_KYBER' \
+          out/.config || true
 
     # ------------------------------------------------------------------
     # 10. Build kernel
@@ -312,15 +327,15 @@ jobs:
 
         # Verify output Image exists
         if [ ! -f out/arch/arm64/boot/Image ]; then
-          echo "==> ERROR: Image not found! Last 50 lines of build log:"
-          tail -50 /tmp/build.log
+          echo "==> ERROR: Image not found! Last 60 lines of build log:"
+          tail -60 /tmp/build.log
           exit 1
         fi
         echo "==> Build SUCCESS: $(ls -lh out/arch/arm64/boot/Image)"
 
         # Check for DTB/DTBO
-        find out/arch/arm64/boot -name '*.dtb' | head -5 || true
-        find out/arch/arm64/boot -name 'dtbo.img' | head -3 || true
+        find out/arch/arm64/boot -name '*.dtb' 2>/dev/null | head -5 || true
+        find out/arch/arm64/boot -name 'dtbo.img' 2>/dev/null | head -3 || true
 
     # ------------------------------------------------------------------
     # 11. Package with AnyKernel3
@@ -342,17 +357,17 @@ jobs:
         # Copy kernel Image
         cp kernel_src/out/arch/arm64/boot/Image anykernel3_pkg/
 
-        # Copy DTBs if present (socrates needs dtb for some firmwares)
+        # Copy dtbo.img if present
         if [ -f kernel_src/out/arch/arm64/boot/dtbo.img ]; then
           cp kernel_src/out/arch/arm64/boot/dtbo.img anykernel3_pkg/
           echo "==> dtbo.img included."
         fi
 
-        # Find and collect dtb files
-        DTB_SRC=$(find kernel_src/out/arch/arm64/boot/dts -name '*.dtb' 2>/dev/null | head -1)
-        if [ -n "$DTB_SRC" ]; then
+        # Collect DTBs
+        if find kernel_src/out/arch/arm64/boot/dts -name '*.dtb' -quit 2>/dev/null; then
           mkdir -p anykernel3_pkg/dtb
-          find kernel_src/out/arch/arm64/boot/dts -name '*.dtb' -exec cp {} anykernel3_pkg/dtb/ \;
+          find kernel_src/out/arch/arm64/boot/dts -name '*.dtb' \
+            -exec cp {} anykernel3_pkg/dtb/ \;
           echo "==> DTBs included."
         fi
 
