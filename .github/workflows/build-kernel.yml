@@ -20,7 +20,7 @@ on:
         required: true
         default: 'susfs-main'
       SUSFS_BRANCH:
-        description: 'SUSFS kernel branch (gki-android13-5.10 for socrates/Android13)'
+        description: 'SUSFS kernel branch'
         required: true
         default: 'gki-android13-5.10'
       ENABLE_KPM:
@@ -125,6 +125,8 @@ jobs:
           "$KERNEL_REPO" \
           kernel_src
         git -C kernel_src log --oneline -3
+        echo "==> arch/arm64/configs/ contents:"
+        ls kernel_src/arch/arm64/configs/
 
     # ------------------------------------------------------------------
     # 5. Integrate SukiSU-Ultra
@@ -186,65 +188,58 @@ jobs:
         bash builder/scripts/apply_susfs.sh kernel_src susfs4ksu
 
     # ------------------------------------------------------------------
-    # 7. Build kernel config using merge_config.sh
+    # 7. Build kernel .config
     #
-    #    socrates-t-oss uses Qualcomm fragment-based config:
-    #      Base: arch/arm64/configs/gki_defconfig
-    #      +     arch/arm64/configs/vendor/socrates_GKI.config
-    #      +     arch/arm64/configs/vendor/socrates_consolidate.config
+    #    socrates-t-oss provides:
+    #      arch/arm64/configs/defconfig               ← FULL device defconfig (USE THIS)
+    #      arch/arm64/configs/vendor/socrates_consolidate.config  ← extra fragment
     #
-    #    We merge them, then append SukiSU+SUSFS+scheduler fragments,
-    #    then run olddefconfig to resolve any conflicts.
+    #    Build flow:
+    #      A. make defconfig       → generates base out/.config from defconfig
+    #      B. merge_config.sh      → merges socrates_consolidate.config on top
+    #      C. append KSU+SUSFS fragment
+    #      D. apply scheduler opts
+    #      E. make olddefconfig    → resolve / validate everything
     # ------------------------------------------------------------------
-    - name: Build kernel .config (merge_config + fragments)
+    - name: Build kernel .config (defconfig + merge_config + fragments)
       working-directory: kernel_src
       run: |
         export PATH="$HOME/clang/bin:$PATH"
         mkdir -p out
 
-        # ---- Step A: generate base GKI .config -------------------------
-        echo "==> Step A: make gki_defconfig"
+        # ---- Step A: make defconfig (arch/arm64/configs/defconfig) -----
+        echo "==> Step A: make defconfig"
         make O=out \
           ARCH=$ARCH \
           CC=clang \
           LLVM=1 \
           LLVM_IAS=1 \
           CROSS_COMPILE=aarch64-linux-gnu- \
-          gki_defconfig
+          defconfig
+        echo "==> defconfig applied. out/.config size: $(wc -l < out/.config) lines"
 
-        # ---- Step B: merge vendor fragments ----------------------------
+        # ---- Step B: merge socrates_consolidate.config fragment ---------
         echo
-        echo "==> Step B: merge vendor fragments via merge_config.sh"
+        echo "==> Step B: merge socrates_consolidate.config"
         MERGE_SH="scripts/kconfig/merge_config.sh"
-        if [ ! -f "$MERGE_SH" ]; then
-          echo "ERROR: $MERGE_SH not found!"; exit 1
-        fi
+        CONSOLIDATE="arch/arm64/configs/vendor/socrates_consolidate.config"
 
-        FRAGS=""
-        for frag in \
-          "arch/arm64/configs/vendor/socrates_GKI.config" \
-          "arch/arm64/configs/vendor/socrates_consolidate.config"; do
-          if [ -f "$frag" ]; then
-            FRAGS="$FRAGS $frag"
-            echo "  + $frag"
-          else
-            echo "  [SKIP] $frag not found"
-          fi
-        done
-
-        if [ -n "$FRAGS" ]; then
+        if [ -f "$MERGE_SH" ] && [ -f "$CONSOLIDATE" ]; then
           KCONFIG_CONFIG=out/.config \
-            bash "$MERGE_SH" -m out/.config $FRAGS
-          echo "==> Vendor fragments merged."
+            bash "$MERGE_SH" -m out/.config "$CONSOLIDATE"
+          echo "==> socrates_consolidate.config merged."
+        elif [ -f "$CONSOLIDATE" ]; then
+          echo "==> merge_config.sh not found, appending fragment directly"
+          cat "$CONSOLIDATE" >> out/.config
         else
-          echo "==> No vendor fragments found, using plain gki_defconfig."
+          echo "==> socrates_consolidate.config not found, skipping."
         fi
 
         # ---- Step C: append SukiSU + SUSFS KConfig fragment ------------
         echo
         echo "==> Step C: appending SukiSU/SUSFS KConfig fragment"
         cat ../builder/configs/sukisu_susfs.config >> out/.config
-        echo "==> KConfig fragment appended."
+        echo "==> Fragment appended."
 
         if [ "$ENABLE_KPM" = "true" ]; then
           echo 'CONFIG_KPM=y' >> out/.config
@@ -253,10 +248,10 @@ jobs:
 
         # ---- Step D: apply scheduler optimizations ---------------------
         echo
-        echo "==> Step D: applying scheduler optimizations"
+        echo "==> Step D: scheduler optimizations"
         bash ../builder/scripts/apply_scheduler_opts.sh "$(pwd)/out/.config"
 
-        # ---- Step E: olddefconfig to resolve everything ----------------
+        # ---- Step E: olddefconfig to validate --------------------------
         echo
         echo "==> Step E: make olddefconfig"
         make O=out \
@@ -268,8 +263,9 @@ jobs:
           olddefconfig
 
         echo
-        echo "==> Final config snapshot (KSU / SUSFS / Scheduler):"
-        grep -E 'CONFIG_KSU|CONFIG_SUSFS|CONFIG_KPM|CONFIG_KALLSYMS|CONFIG_SCHED_WALT|CONFIG_HZ=|CONFIG_PREEMPT=|CONFIG_TCP_CONG_BBR|CONFIG_MQ_IOSCHED_KYBER|CONFIG_LTO' \
+        echo "==> Config summary (KSU / SUSFS / Scheduler):"
+        grep -E \
+          'CONFIG_KSU|CONFIG_SUSFS|CONFIG_KPM|CONFIG_KALLSYMS_ALL|CONFIG_SCHED_WALT|CONFIG_HZ=|CONFIG_PREEMPT=|CONFIG_TCP_CONG_BBR|CONFIG_MQ_IOSCHED_KYBER' \
           out/.config || true
 
     # ------------------------------------------------------------------
@@ -298,7 +294,7 @@ jobs:
           exit 1
         fi
         echo "==> Build SUCCESS: $(ls -lh out/arch/arm64/boot/Image)"
-        find out/arch/arm64/boot -name '*.dtb'  2>/dev/null | head -5 || true
+        find out/arch/arm64/boot -name '*.dtb'    2>/dev/null | head -5 || true
         find out/arch/arm64/boot -name 'dtbo.img' 2>/dev/null | head -3 || true
 
     # ------------------------------------------------------------------
