@@ -136,16 +136,13 @@ jobs:
         echo "==> Checking for hwid Kconfig references..."
         grep -rn 'hwid/Kconfig' . --include='Kconfig' 2>/dev/null || echo "  (none found)"
 
-        # Fix 1: Comment out the broken source line in ALL Kconfig files
         find . -name 'Kconfig' -exec grep -l 'hwid/Kconfig' {} \; 2>/dev/null | \
           while IFS= read -r f; do
             sed -i 's|source "drivers/misc/hwid/Kconfig"|# source "drivers/misc/hwid/Kconfig"  # disabled: not in OSS|g' "$f"
             echo "  Patched: $f"
           done
 
-        # Fix 2: Create stub using printf (no heredoc = no YAML issues)
         mkdir -p drivers/misc/hwid
-
         printf '%s\n' \
           '# Xiaomi HWID driver stub for OSS kernel builds' \
           'config HWID' \
@@ -154,21 +151,101 @@ jobs:
           '    help' \
           '      Stub for OSS builds. Set to n.' \
           > drivers/misc/hwid/Kconfig
-
-        printf '%s\n' \
-          'obj-$(CONFIG_HWID) += hwid.o' \
-          > drivers/misc/hwid/Makefile
-
+        printf '%s\n' 'obj-$(CONFIG_HWID) += hwid.o' > drivers/misc/hwid/Makefile
         printf '%s\n' \
           '// SPDX-License-Identifier: GPL-2.0' \
-          '// Xiaomi HWID stub for OSS builds' \
           '#include <linux/module.h>' \
           'MODULE_LICENSE("GPL v2");' \
-          'MODULE_DESCRIPTION("Xiaomi HWID stub");' \
           > drivers/misc/hwid/hwid.c
+        echo "==> hwid stub created."
 
-        echo "==> hwid stub created. Verification:"
-        cat drivers/misc/hwid/Kconfig
+    # ------------------------------------------------------------------
+    # 4c. Patch android_vendor.h to enable ANDROID_VENDOR_DATA unconditionally
+    #
+    # Root cause: CONFIG_ANDROID_VENDOR_OEM_DATA has NO Kconfig entry in
+    # socrates-t-oss, so olddefconfig silently drops it. Without it,
+    # ANDROID_VENDOR_DATA(n) expands to nothing, and task_struct lacks
+    # android_vendor_data1, causing walt.h compile errors.
+    #
+    # Fix: remove the #ifdef guard so the macros always expand.
+    # ------------------------------------------------------------------
+    - name: Patch android_vendor.h to unconditionally enable vendor data fields
+      working-directory: kernel_src
+      run: |
+        VENDOR_H="include/linux/android_vendor.h"
+        if [ ! -f "$VENDOR_H" ]; then
+          echo "==> $VENDOR_H not found, skipping patch."
+          exit 0
+        fi
+
+        echo "==> Before patch (ifdef block):"
+        grep -n 'CONFIG_ANDROID_VENDOR_OEM_DATA\|#ifdef\|#else\|#endif' "$VENDOR_H" | head -20
+
+        # Strategy: replace the #ifdef CONFIG_ANDROID_VENDOR_OEM_DATA ... #else ... #endif
+        # block so the "defined" branch is always active.
+        #
+        # The file structure is:
+        #   #ifdef CONFIG_ANDROID_VENDOR_OEM_DATA
+        #   #define ANDROID_VENDOR_DATA(n)   u64 android_vendor_data##n
+        #   ... (other defines in the "yes" branch)
+        #   #else
+        #   #define ANDROID_VENDOR_DATA(n)
+        #   ... (empty defines in the "no" branch)
+        #   #endif
+        #
+        # We use Python (available on ubuntu-22.04) for reliable multi-line replacement.
+        python3 - <<'PYEOF'
+import re, sys
+
+path = "include/linux/android_vendor.h"
+with open(path) as f:
+    content = f.read()
+
+# Remove the #ifdef CONFIG_ANDROID_VENDOR_OEM_DATA line
+content = re.sub(r'^#ifdef\s+CONFIG_ANDROID_VENDOR_OEM_DATA\s*\n', '', content, flags=re.MULTILINE)
+
+# Remove the #else block: everything from '#else' up to (but not including) '#endif'
+# that is part of this ifdef. We match the specific empty-define block.
+content = re.sub(
+    r'#else\s*\n'
+    r'(#define ANDROID_VENDOR_DATA\(n\)\s*\n'
+    r'#define ANDROID_VENDOR_DATA_ARRAY\(n,\s*s\)\s*\n'
+    r'#define ANDROID_OEM_DATA\(n\)\s*\n'
+    r'#define ANDROID_OEM_DATA_ARRAY\(n,\s*s\)\s*\n'
+    r'#define ANDROID_BACKPORT_RESERVED\(n\)\s*\n'
+    r'\s*\n'
+    r'#define android_init_vendor_data\(p,\s*n\)\s*\n'
+    r'#define android_init_oem_data\(p,\s*n\)\s*\n'
+    r')#endif',
+    '',
+    content
+)
+
+# Fallback: if the above regex didn't match (whitespace variation), just
+# remove the guard lines individually
+if '#ifdef CONFIG_ANDROID_VENDOR_OEM_DATA' in content:
+    # Still present -- simpler approach: comment out the guard
+    content = content.replace(
+        '#ifdef CONFIG_ANDROID_VENDOR_OEM_DATA',
+        '/* #ifdef CONFIG_ANDROID_VENDOR_OEM_DATA -- forced ON for OSS build */'
+    )
+    # Comment out the matching #else and #endif for the empty-macro block
+    # Find and comment the #else that precedes the empty ANDROID_VENDOR_DATA
+    content = re.sub(
+        r'(#else)(\s*\n#define ANDROID_VENDOR_DATA\(n\)\s*\n)',
+        r'/* \1 */ // OSS: vendor data always enabled\2',
+        content
+    )
+
+with open(path, 'w') as f:
+    f.write(content)
+
+print("==> Patch applied.")
+PYEOF
+
+        echo "==> After patch (showing macro definitions):"
+        grep -n 'ANDROID_VENDOR_DATA\|CONFIG_ANDROID_VENDOR_OEM_DATA\|#ifdef\|#else\|#endif' \
+          "$VENDOR_H" | head -30
 
     # ------------------------------------------------------------------
     # 5. Integrate SukiSU-Ultra
@@ -241,7 +318,7 @@ jobs:
           echo "==> After consolidate: $(wc -l < out/.config) lines"
         fi
 
-        echo "==> Step C: appending SukiSU/SUSFS + KPM + vendor data"
+        echo "==> Step C: appending SukiSU/SUSFS fragment + hwid=n"
         cat ../builder/configs/sukisu_susfs.config >> out/.config
         echo "# CONFIG_HWID is not set" >> out/.config
         [ "$ENABLE_KPM" = "true" ] && echo 'CONFIG_KPM=y' >> out/.config
@@ -264,7 +341,7 @@ jobs:
 
         echo
         echo "==> Final .config key values:"
-        grep -E 'CONFIG_KSU=|CONFIG_SUSFS=|CONFIG_KPM=|CONFIG_KALLSYMS_ALL=|CONFIG_ANDROID_VENDOR_OEM_DATA=|CONFIG_ANDROID_VENDOR_HOOKS=|CONFIG_SCHED_WALT=|CONFIG_HZ=|CONFIG_PREEMPT=' \
+        grep -E 'CONFIG_KSU=|CONFIG_SUSFS=|CONFIG_KPM=|CONFIG_KALLSYMS_ALL=|CONFIG_SCHED_WALT=|CONFIG_HZ=|CONFIG_PREEMPT=' \
           out/.config 2>/dev/null || true
 
     # ------------------------------------------------------------------
@@ -291,13 +368,11 @@ jobs:
 
         if [ $BUILD_EXIT -ne 0 ] || [ ! -f out/arch/arm64/boot/Image ]; then
           echo
-          echo "==> BUILD FAILED (exit $BUILD_EXIT). Showing ALL compiler errors:"
-          echo "--- grep error: ---"
+          echo "==> BUILD FAILED (exit $BUILD_EXIT). Compiler errors:"
           grep -n ': error:' /tmp/build.log | head -60 || true
-          echo "--- grep fatal: ---"
           grep -n ': fatal error:' /tmp/build.log | head -20 || true
-          echo "--- Last 40 lines of build.log ---"
-          tail -40 /tmp/build.log
+          echo "--- Last 50 lines ---"
+          tail -50 /tmp/build.log
           exit 1
         fi
 
