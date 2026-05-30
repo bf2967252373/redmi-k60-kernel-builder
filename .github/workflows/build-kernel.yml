@@ -76,7 +76,7 @@ jobs:
       uses: actions/cache@v4
       with:
         path: ~/.ccache
-        key: ccache-socrates-${{ github.run_id }}
+        key: ccache-socrates-${{ github.sha }}
         restore-keys: ccache-socrates-
 
     - name: Cache Neutron Clang
@@ -100,7 +100,7 @@ jobs:
           tar --use-compress-program=zstd -xf /tmp/neutron-clang.tar.zst -C ~/clang
           echo "CLANG_SOURCE=neutron" >> $GITHUB_ENV
         else
-          echo "==> Neutron unavailable, falling back to AOSP Clang ${AOSP_CLANG_VER}..."
+          echo "==> Neutron unavailable, falling back to AOSP Clang ..."
           AOSP_URL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-${AOSP_CLANG_VER}.tar.gz"
           curl -fL --retry 3 "$AOSP_URL" -o /tmp/aosp-clang.tar.gz
           tar -xf /tmp/aosp-clang.tar.gz -C ~/clang
@@ -130,79 +130,56 @@ jobs:
     # ------------------------------------------------------------------
     # 4b. Fix broken Kconfig references in socrates-t-oss
     #
-    #  Root cause confirmed (Run #1-6):
-    #    drivers/misc/Kconfig line 517 has:
-    #      source "drivers/misc/hwid/Kconfig"
-    #    but drivers/misc/hwid/Kconfig does NOT exist in the shallow clone.
-    #    This file is part of Xiaomi's proprietary HWID driver that is
-    #    referenced in the public Kconfig but not released as OSS.
-    #
-    #  Effect: EVERY make invocation that runs Kconfig parsing (defconfig,
-    #    syncconfig, olddefconfig used during actual build) fails with:
-    #      "can't open file 'drivers/misc/hwid/Kconfig'"
-    #
-    #  Fix (dual approach for safety):
-    #    1. Comment out the broken source line in drivers/misc/Kconfig
-    #    2. Create a minimal stub drivers/misc/hwid/Kconfig as backup
+    # Root cause: drivers/misc/Kconfig references drivers/misc/hwid/Kconfig
+    # but that file is not released in the OSS kernel tree.
+    # Fix: comment out the reference AND create a minimal stub file.
+    # Using printf instead of heredoc to avoid YAML syntax issues.
     # ------------------------------------------------------------------
     - name: Fix missing drivers/misc/hwid/Kconfig (Xiaomi proprietary stub)
       working-directory: kernel_src
       run: |
-        echo "==> Checking drivers/misc/Kconfig for broken hwid source line..."
-        grep -n 'hwid' drivers/misc/Kconfig || echo "  (no hwid reference found)"
+        echo "==> Checking for hwid Kconfig references..."
+        grep -rn 'hwid/Kconfig' . --include='Kconfig' 2>/dev/null || echo "  (none found)"
 
-        # Fix 1: Comment out the broken source line (primary fix)
-        if grep -q 'source.*drivers/misc/hwid/Kconfig' drivers/misc/Kconfig; then
-          sed -i 's|^source "drivers/misc/hwid/Kconfig"|# source "drivers/misc/hwid/Kconfig"  # disabled: file not in OSS release|' \
-            drivers/misc/Kconfig
-          echo "==> Commented out drivers/misc/hwid/Kconfig source line."
-        else
-          echo "==> hwid source line not found at expected location — scanning..."
-          grep -rn 'hwid/Kconfig' . --include='Kconfig' 2>/dev/null | head -10 || true
-          # Broaden the comment-out to all Kconfig files referencing hwid
-          find . -name 'Kconfig' -exec grep -l 'hwid/Kconfig' {} \; 2>/dev/null | \
-            while read f; do
-              sed -i 's|source "drivers/misc/hwid/Kconfig"|# source "drivers/misc/hwid/Kconfig"  # disabled: not in OSS|g' "$f"
-              echo "  Patched: $f"
-            done
-        fi
+        # Fix 1: Comment out the broken source line in ALL Kconfig files
+        find . -name 'Kconfig' -exec grep -l 'hwid/Kconfig' {} \; 2>/dev/null | \
+          while IFS= read -r f; do
+            sed -i 's|source "drivers/misc/hwid/Kconfig"|# source "drivers/misc/hwid/Kconfig"  # disabled: not in OSS|g' "$f"
+            echo "  Patched: $f"
+          done
 
-        # Fix 2: Create minimal stub as fallback (backup safety net)
+        # Fix 2: Create stub using printf (no heredoc = no YAML issues)
         mkdir -p drivers/misc/hwid
-        if [ ! -f drivers/misc/hwid/Kconfig ]; then
-          cat > drivers/misc/hwid/Kconfig << 'KCONFIG_EOF'
-# Xiaomi HWID driver - stub for OSS build
-# The real implementation is not released as open source.
-config HWID
-	tristate "Xiaomi Hardware ID driver"
-	default n
-	help
-	  Stub Kconfig for Xiaomi HWID driver.
-	  Set to n for AOSP/custom kernel builds.
-KCONFIG_EOF
-          echo "==> Created stub drivers/misc/hwid/Kconfig"
-        fi
 
-        # Create a minimal stub Makefile too
-        if [ ! -f drivers/misc/hwid/Makefile ]; then
-          echo "obj-$(CONFIG_HWID) += hwid.o" > drivers/misc/hwid/Makefile
-          echo "==> Created stub drivers/misc/hwid/Makefile"
-        fi
+        printf '%s\n' \
+          '# Xiaomi HWID driver stub for OSS kernel builds' \
+          'config HWID' \
+          '    tristate "Xiaomi Hardware ID driver"' \
+          '    default n' \
+          '    help' \
+          '      Stub for OSS builds. Set to n.' \
+          > drivers/misc/hwid/Kconfig
+        echo "==> Created stub drivers/misc/hwid/Kconfig"
 
-        # Create minimal stub C source (in case Makefile references it)
-        if [ ! -f drivers/misc/hwid/hwid.c ]; then
-          cat > drivers/misc/hwid/hwid.c << 'C_EOF'
-// SPDX-License-Identifier: GPL-2.0
-// Xiaomi HWID driver stub for OSS kernel builds
-#include <linux/module.h>
-MODULE_LICENSE("GPL v2");
-MODULE_DESCRIPTION("Xiaomi HWID stub");
-C_EOF
-          echo "==> Created stub drivers/misc/hwid/hwid.c"
-        fi
+        printf '%s\n' \
+          'obj-$(CONFIG_HWID) += hwid.o' \
+          > drivers/misc/hwid/Makefile
+        echo "==> Created stub drivers/misc/hwid/Makefile"
 
-        echo "==> Verifying fix — Kconfig parse test:"
-        grep -n 'hwid' drivers/misc/Kconfig || echo "  (hwid line successfully removed/commented)"
+        printf '%s\n' \
+          '// SPDX-License-Identifier: GPL-2.0' \
+          '// Xiaomi HWID stub for OSS builds' \
+          '#include <linux/module.h>' \
+          'MODULE_LICENSE("GPL v2");' \
+          'MODULE_DESCRIPTION("Xiaomi HWID stub");' \
+          > drivers/misc/hwid/hwid.c
+        echo "==> Created stub drivers/misc/hwid/hwid.c"
+
+        echo "==> Verification:"
+        echo "--- drivers/misc/hwid/Kconfig ---"
+        cat drivers/misc/hwid/Kconfig
+        echo "--- grep hwid in drivers/misc/Kconfig ---"
+        grep -n 'hwid' drivers/misc/Kconfig || echo "  (hwid references removed)"
 
     # ------------------------------------------------------------------
     # 5. Integrate SukiSU-Ultra
@@ -260,13 +237,6 @@ C_EOF
 
     # ------------------------------------------------------------------
     # 7. Assemble kernel .config
-    #
-    #  Build flow (avoids broken Kconfig parser where possible):
-    #    A. cp defconfig -> out/.config  (no Kconfig parse needed)
-    #    B. cat socrates_consolidate.config >> out/.config
-    #    C. cat sukisu_susfs.config + KPM >> out/.config
-    #    D. apply_scheduler_opts.sh
-    #    E. make olddefconfig  (lenient: validates what it can parse)
     # ------------------------------------------------------------------
     - name: Assemble kernel .config (cp + cat + olddefconfig)
       working-directory: kernel_src
@@ -422,8 +392,8 @@ C_EOF
         echo "============================================"
         if [ -f kernel_src/out/arch/arm64/boot/Image ]; then
           echo "  Image size    : $(du -sh kernel_src/out/arch/arm64/boot/Image | cut -f1)"
-          echo "  BUILD STATUS  : SUCCESS ✓"
+          echo "  BUILD STATUS  : SUCCESS V"
         else
-          echo "  BUILD STATUS  : FAILED ✗"
+          echo "  BUILD STATUS  : FAILED X"
         fi
         echo "============================================"
