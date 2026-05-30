@@ -39,6 +39,11 @@ env:
   ARCH: arm64
   JOBS: 4
   ENABLE_KPM: ${{ github.event.inputs.ENABLE_KPM || 'true' }}
+  # Force-define CONFIG_ANDROID_VENDOR_OEM_DATA via preprocessor flag.
+  # The macro has no Kconfig entry in socrates-t-oss, so olddefconfig would
+  # silently drop it if we tried CONFIG_ANDROID_VENDOR_OEM_DATA=y in .config.
+  # Using KCPPFLAGS injects it at the C preprocessor level unconditionally.
+  VENDOR_CPPFLAG: "-DCONFIG_ANDROID_VENDOR_OEM_DATA"
 
 jobs:
   build:
@@ -128,124 +133,40 @@ jobs:
         ls kernel_src/arch/arm64/configs/
 
     # ------------------------------------------------------------------
-    # 4b. Fix broken Kconfig references in socrates-t-oss
+    # 4b. Fix missing drivers/misc/hwid/Kconfig
     # ------------------------------------------------------------------
-    - name: Fix missing drivers/misc/hwid/Kconfig (Xiaomi proprietary stub)
+    - name: Fix missing drivers/misc/hwid/Kconfig
       working-directory: kernel_src
       run: |
-        echo "==> Checking for hwid Kconfig references..."
-        grep -rn 'hwid/Kconfig' . --include='Kconfig' 2>/dev/null || echo "  (none found)"
-
         find . -name 'Kconfig' -exec grep -l 'hwid/Kconfig' {} \; 2>/dev/null | \
           while IFS= read -r f; do
-            sed -i 's|source "drivers/misc/hwid/Kconfig"|# source "drivers/misc/hwid/Kconfig"  # disabled: not in OSS|g' "$f"
-            echo "  Patched: $f"
+            sed -i 's|source "drivers/misc/hwid/Kconfig"|# source "drivers/misc/hwid/Kconfig"|g' "$f"
+            echo "  Patched Kconfig ref: $f"
           done
-
         mkdir -p drivers/misc/hwid
-        printf '%s\n' \
-          '# Xiaomi HWID driver stub for OSS kernel builds' \
-          'config HWID' \
-          '    tristate "Xiaomi Hardware ID driver"' \
-          '    default n' \
-          '    help' \
-          '      Stub for OSS builds. Set to n.' \
+        printf '%s\n' 'config HWID' '    tristate "Xiaomi HWID stub"' '    default n' \
           > drivers/misc/hwid/Kconfig
         printf '%s\n' 'obj-$(CONFIG_HWID) += hwid.o' > drivers/misc/hwid/Makefile
-        printf '%s\n' \
-          '// SPDX-License-Identifier: GPL-2.0' \
-          '#include <linux/module.h>' \
-          'MODULE_LICENSE("GPL v2");' \
-          > drivers/misc/hwid/hwid.c
+        printf '%s\n' '// SPDX-License-Identifier: GPL-2.0' '#include <linux/module.h>' \
+          'MODULE_LICENSE("GPL v2");' > drivers/misc/hwid/hwid.c
         echo "==> hwid stub created."
 
     # ------------------------------------------------------------------
-    # 4c. Patch android_vendor.h to enable ANDROID_VENDOR_DATA unconditionally
+    # 4c. Patch android_vendor.h to enable vendor data fields unconditionally
     #
-    # Root cause: CONFIG_ANDROID_VENDOR_OEM_DATA has NO Kconfig entry in
-    # socrates-t-oss, so olddefconfig silently drops it. Without it,
-    # ANDROID_VENDOR_DATA(n) expands to nothing, and task_struct lacks
-    # android_vendor_data1, causing walt.h compile errors.
-    #
-    # Fix: remove the #ifdef guard so the macros always expand.
+    # Uses an external Python script (no heredoc in YAML).
+    # Dual safety: the script edits the header file, AND we pass
+    # KCPPFLAGS=-DCONFIG_ANDROID_VENDOR_OEM_DATA to every make invocation
+    # so the preprocessor sees it even if the script doesn't match.
     # ------------------------------------------------------------------
-    - name: Patch android_vendor.h to unconditionally enable vendor data fields
+    - name: Patch android_vendor.h (enable vendor data unconditionally)
       working-directory: kernel_src
       run: |
-        VENDOR_H="include/linux/android_vendor.h"
-        if [ ! -f "$VENDOR_H" ]; then
-          echo "==> $VENDOR_H not found, skipping patch."
-          exit 0
-        fi
-
-        echo "==> Before patch (ifdef block):"
-        grep -n 'CONFIG_ANDROID_VENDOR_OEM_DATA\|#ifdef\|#else\|#endif' "$VENDOR_H" | head -20
-
-        # Strategy: replace the #ifdef CONFIG_ANDROID_VENDOR_OEM_DATA ... #else ... #endif
-        # block so the "defined" branch is always active.
-        #
-        # The file structure is:
-        #   #ifdef CONFIG_ANDROID_VENDOR_OEM_DATA
-        #   #define ANDROID_VENDOR_DATA(n)   u64 android_vendor_data##n
-        #   ... (other defines in the "yes" branch)
-        #   #else
-        #   #define ANDROID_VENDOR_DATA(n)
-        #   ... (empty defines in the "no" branch)
-        #   #endif
-        #
-        # We use Python (available on ubuntu-22.04) for reliable multi-line replacement.
-        python3 - <<'PYEOF'
-import re, sys
-
-path = "include/linux/android_vendor.h"
-with open(path) as f:
-    content = f.read()
-
-# Remove the #ifdef CONFIG_ANDROID_VENDOR_OEM_DATA line
-content = re.sub(r'^#ifdef\s+CONFIG_ANDROID_VENDOR_OEM_DATA\s*\n', '', content, flags=re.MULTILINE)
-
-# Remove the #else block: everything from '#else' up to (but not including) '#endif'
-# that is part of this ifdef. We match the specific empty-define block.
-content = re.sub(
-    r'#else\s*\n'
-    r'(#define ANDROID_VENDOR_DATA\(n\)\s*\n'
-    r'#define ANDROID_VENDOR_DATA_ARRAY\(n,\s*s\)\s*\n'
-    r'#define ANDROID_OEM_DATA\(n\)\s*\n'
-    r'#define ANDROID_OEM_DATA_ARRAY\(n,\s*s\)\s*\n'
-    r'#define ANDROID_BACKPORT_RESERVED\(n\)\s*\n'
-    r'\s*\n'
-    r'#define android_init_vendor_data\(p,\s*n\)\s*\n'
-    r'#define android_init_oem_data\(p,\s*n\)\s*\n'
-    r')#endif',
-    '',
-    content
-)
-
-# Fallback: if the above regex didn't match (whitespace variation), just
-# remove the guard lines individually
-if '#ifdef CONFIG_ANDROID_VENDOR_OEM_DATA' in content:
-    # Still present -- simpler approach: comment out the guard
-    content = content.replace(
-        '#ifdef CONFIG_ANDROID_VENDOR_OEM_DATA',
-        '/* #ifdef CONFIG_ANDROID_VENDOR_OEM_DATA -- forced ON for OSS build */'
-    )
-    # Comment out the matching #else and #endif for the empty-macro block
-    # Find and comment the #else that precedes the empty ANDROID_VENDOR_DATA
-    content = re.sub(
-        r'(#else)(\s*\n#define ANDROID_VENDOR_DATA\(n\)\s*\n)',
-        r'/* \1 */ // OSS: vendor data always enabled\2',
-        content
-    )
-
-with open(path, 'w') as f:
-    f.write(content)
-
-print("==> Patch applied.")
-PYEOF
-
-        echo "==> After patch (showing macro definitions):"
-        grep -n 'ANDROID_VENDOR_DATA\|CONFIG_ANDROID_VENDOR_OEM_DATA\|#ifdef\|#else\|#endif' \
-          "$VENDOR_H" | head -30
+        python3 ../builder/scripts/patch_android_vendor.py
+        echo "==> android_vendor.h patch done."
+        echo "==> Relevant lines:"
+        grep -n 'android_vendor_data\|ANDROID_VENDOR_DATA\|ifdef CONFIG_ANDROID' \
+          include/linux/android_vendor.h | head -20 || true
 
     # ------------------------------------------------------------------
     # 5. Integrate SukiSU-Ultra
@@ -256,21 +177,16 @@ PYEOF
         echo "==> Integrating SukiSU-Ultra (ref: $SUKISU_REF)..."
         git clone --depth=1 --branch "$SUKISU_REF" "$SUKISU_REPO" KernelSU 2>/dev/null || \
         git clone --depth=1 "$SUKISU_REPO" KernelSU
-        cd KernelSU
-        git checkout "$SUKISU_REF" 2>/dev/null || true
+        cd KernelSU && git checkout "$SUKISU_REF" 2>/dev/null || true
         echo "==> SukiSU: $(git log --oneline -1)"
         cd ..
-
         DRIVER_DIR="$(pwd)/drivers"
         ln -sf "$(realpath --relative-to="$DRIVER_DIR" "$(pwd)/KernelSU/kernel")" \
           "$DRIVER_DIR/kernelsu"
-
-        if ! grep -q 'kernelsu' "$DRIVER_DIR/Makefile"; then
+        grep -q 'kernelsu' "$DRIVER_DIR/Makefile" || \
           printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> "$DRIVER_DIR/Makefile"
-        fi
-        if ! grep -q 'drivers/kernelsu/Kconfig' "$DRIVER_DIR/Kconfig"; then
+        grep -q 'drivers/kernelsu/Kconfig' "$DRIVER_DIR/Kconfig" || \
           sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' "$DRIVER_DIR/Kconfig"
-        fi
         echo "==> SukiSU integration complete."
 
     # ------------------------------------------------------------------
@@ -278,12 +194,8 @@ PYEOF
     # ------------------------------------------------------------------
     - name: Clone SUSFS and apply patches
       run: |
-        echo "==> Cloning SUSFS branch: $SUSFS_BRANCH ..."
         git clone --depth=1 --branch "$SUSFS_BRANCH" "$SUSFS_REPO" susfs4ksu
-
-        echo "==> kernel_patches/ listing:"
         ls susfs4ksu/kernel_patches/ || true
-
         if [ -d susfs4ksu/kernel_patches/fs ]; then
           for f in susfs4ksu/kernel_patches/fs/*.c; do
             [ -f "$f" ] && cp -v "$f" kernel_src/fs/ || true
@@ -295,54 +207,38 @@ PYEOF
             [ -f "$f" ] && cp -v "$f" kernel_src/include/linux/ || true
           done
         fi
-
         bash builder/scripts/apply_susfs.sh kernel_src susfs4ksu
 
     # ------------------------------------------------------------------
     # 7. Assemble kernel .config
     # ------------------------------------------------------------------
-    - name: Assemble kernel .config (cp + cat + olddefconfig)
+    - name: Assemble kernel .config
       working-directory: kernel_src
       run: |
         export PATH="$HOME/clang/bin:$PATH"
         mkdir -p out
-
-        echo "==> Step A: cp arch/arm64/configs/defconfig -> out/.config"
         cp arch/arm64/configs/defconfig out/.config
-        echo "==> Base: $(wc -l < out/.config) lines"
-
         CONSOLIDATE="arch/arm64/configs/vendor/socrates_consolidate.config"
-        if [ -f "$CONSOLIDATE" ]; then
-          echo "==> Step B: appending $CONSOLIDATE"
-          cat "$CONSOLIDATE" >> out/.config
-          echo "==> After consolidate: $(wc -l < out/.config) lines"
-        fi
-
-        echo "==> Step C: appending SukiSU/SUSFS fragment + hwid=n"
+        [ -f "$CONSOLIDATE" ] && cat "$CONSOLIDATE" >> out/.config
         cat ../builder/configs/sukisu_susfs.config >> out/.config
         echo "# CONFIG_HWID is not set" >> out/.config
         [ "$ENABLE_KPM" = "true" ] && echo 'CONFIG_KPM=y' >> out/.config
-
-        echo "==> Step D: scheduler optimizations"
         bash ../builder/scripts/apply_scheduler_opts.sh "$(pwd)/out/.config"
 
-        echo "==> Step E: make olddefconfig"
         make O=out \
           ARCH=$ARCH \
           CC=clang \
-          LLVM=1 \
-          LLVM_IAS=1 \
+          LLVM=1 LLVM_IAS=1 \
           CROSS_COMPILE=aarch64-linux-gnu- \
+          KCPPFLAGS="$VENDOR_CPPFLAG" \
           olddefconfig 2>&1 | tee /tmp/olddefconfig.log || {
-          echo "==> WARNING: olddefconfig non-zero exit"
-          [ -f out/.config ] || { echo "ERROR: no .config generated!"; exit 1; }
-          echo "==> .config exists ($(wc -l < out/.config) lines), continuing."
+          [ -f out/.config ] || { echo "ERROR: no .config!"; exit 1; }
+          echo "==> olddefconfig warning ignored (config exists)."
         }
 
-        echo
-        echo "==> Final .config key values:"
-        grep -E 'CONFIG_KSU=|CONFIG_SUSFS=|CONFIG_KPM=|CONFIG_KALLSYMS_ALL=|CONFIG_SCHED_WALT=|CONFIG_HZ=|CONFIG_PREEMPT=' \
-          out/.config 2>/dev/null || true
+        echo "==> Key config values:"
+        grep -E 'CONFIG_KSU=|CONFIG_SUSFS=|CONFIG_KPM=|CONFIG_KALLSYMS_ALL=|CONFIG_SCHED_WALT=' \
+          out/.config || true
 
     # ------------------------------------------------------------------
     # 8. Build kernel
@@ -353,32 +249,26 @@ PYEOF
         export PATH="$HOME/clang/bin:$PATH"
         export KBUILD_BUILD_USER="SukiSU-Builder"
         export KBUILD_BUILD_HOST="github-actions"
-
-        echo "==> Starting kernel build (jobs: $JOBS)..."
         set -o pipefail
         make O=out \
           ARCH=$ARCH \
           CC="ccache clang" \
-          LLVM=1 \
-          LLVM_IAS=1 \
+          LLVM=1 LLVM_IAS=1 \
           CROSS_COMPILE=aarch64-linux-gnu- \
+          KCPPFLAGS="$VENDOR_CPPFLAG" \
           -j$JOBS \
           2>&1 | tee /tmp/build.log
         BUILD_EXIT=${PIPESTATUS[0]}
 
         if [ $BUILD_EXIT -ne 0 ] || [ ! -f out/arch/arm64/boot/Image ]; then
-          echo
-          echo "==> BUILD FAILED (exit $BUILD_EXIT). Compiler errors:"
+          echo "==> BUILD FAILED. Compiler errors:"
           grep -n ': error:' /tmp/build.log | head -60 || true
           grep -n ': fatal error:' /tmp/build.log | head -20 || true
           echo "--- Last 50 lines ---"
           tail -50 /tmp/build.log
           exit 1
         fi
-
-        echo "==> Build SUCCESS: $(ls -lh out/arch/arm64/boot/Image)"
-        find out/arch/arm64/boot -name '*.dtb'    2>/dev/null | head -5 || true
-        find out/arch/arm64/boot -name 'dtbo.img' 2>/dev/null | head -3 || true
+        echo "==> SUCCESS: $(ls -lh out/arch/arm64/boot/Image)"
 
     # ------------------------------------------------------------------
     # 9. Package with AnyKernel3
@@ -390,23 +280,17 @@ PYEOF
         rm -rf anykernel3_pkg/ramdisk anykernel3_pkg/patch anykernel3_pkg/modules
         cp builder/anykernel/anykernel.sh anykernel3_pkg/
         cp kernel_src/out/arch/arm64/boot/Image anykernel3_pkg/
-
         [ -f kernel_src/out/arch/arm64/boot/dtbo.img ] && \
-          cp kernel_src/out/arch/arm64/boot/dtbo.img anykernel3_pkg/ && \
-          echo "==> dtbo.img included."
-
+          cp kernel_src/out/arch/arm64/boot/dtbo.img anykernel3_pkg/
         if find kernel_src/out/arch/arm64/boot/dts -name '*.dtb' -quit 2>/dev/null; then
           mkdir -p anykernel3_pkg/dtb
           find kernel_src/out/arch/arm64/boot/dts -name '*.dtb' \
             -exec cp {} anykernel3_pkg/dtb/ \;
-          echo "==> DTBs included."
         fi
-
         TIMESTAMP=$(date +%Y%m%d_%H%M)
         SUKISU_VER=$(cat kernel_src/KernelSU/version 2>/dev/null | tr -d '\n' || echo 'unknown')
         ZIP_NAME="Socrates_SukiSU_${SUKISU_VER}_SUSFS_${TIMESTAMP}.zip"
-        cd anykernel3_pkg
-        zip -r9 "../$ZIP_NAME" . -x '*.git*' -x '*README*'
+        cd anykernel3_pkg && zip -r9 "../$ZIP_NAME" . -x '*.git*' -x '*README*'
         cd ..
         echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
         echo "==> Package: $(ls -lh $ZIP_NAME)"
@@ -414,14 +298,14 @@ PYEOF
     # ------------------------------------------------------------------
     # 10. Upload artifacts
     # ------------------------------------------------------------------
-    - name: Upload kernel zip artifact
+    - name: Upload kernel zip
       uses: actions/upload-artifact@v4
       with:
         name: ${{ env.ZIP_NAME }}
         path: ${{ env.ZIP_NAME }}
         retention-days: 30
 
-    - name: Upload raw Image artifact
+    - name: Upload kernel Image
       uses: actions/upload-artifact@v4
       with:
         name: kernel-Image-socrates
@@ -445,25 +329,24 @@ PYEOF
         retention-days: 7
 
     # ------------------------------------------------------------------
-    # 11. Print build summary
+    # 11. Summary
     # ------------------------------------------------------------------
-    - name: Print build summary
+    - name: Build summary
       if: always()
       run: |
-        echo "============================================"
-        echo " Redmi K60 (socrates) Kernel Build Summary"
-        echo "============================================"
-        echo "  Kernel branch : $KERNEL_BRANCH"
-        echo "  SukiSU ref    : $SUKISU_REF"
-        echo "  SUSFS branch  : $SUSFS_BRANCH"
-        echo "  KPM enabled   : $ENABLE_KPM"
-        echo "  Clang source  : ${CLANG_SOURCE:-unknown}"
-        echo "  Output zip    : ${ZIP_NAME:-N/A}"
-        echo "============================================"
+        echo "===================================="
+        echo " Redmi K60 (socrates) Build Summary"
+        echo "===================================="
+        echo "  Branch  : $KERNEL_BRANCH"
+        echo "  SukiSU  : $SUKISU_REF"
+        echo "  SUSFS   : $SUSFS_BRANCH"
+        echo "  KPM     : $ENABLE_KPM"
+        echo "  Clang   : ${CLANG_SOURCE:-unknown}"
+        echo "  Zip     : ${ZIP_NAME:-N/A}"
         if [ -f kernel_src/out/arch/arm64/boot/Image ]; then
-          echo "  Image size    : $(du -sh kernel_src/out/arch/arm64/boot/Image | cut -f1)"
-          echo "  BUILD STATUS  : SUCCESS V"
+          echo "  Size    : $(du -sh kernel_src/out/arch/arm64/boot/Image | cut -f1)"
+          echo "  STATUS  : SUCCESS"
         else
-          echo "  BUILD STATUS  : FAILED X"
+          echo "  STATUS  : FAILED"
         fi
-        echo "============================================"
+        echo "===================================="
