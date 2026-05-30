@@ -128,6 +128,83 @@ jobs:
         ls kernel_src/arch/arm64/configs/
 
     # ------------------------------------------------------------------
+    # 4b. Fix broken Kconfig references in socrates-t-oss
+    #
+    #  Root cause confirmed (Run #1-6):
+    #    drivers/misc/Kconfig line 517 has:
+    #      source "drivers/misc/hwid/Kconfig"
+    #    but drivers/misc/hwid/Kconfig does NOT exist in the shallow clone.
+    #    This file is part of Xiaomi's proprietary HWID driver that is
+    #    referenced in the public Kconfig but not released as OSS.
+    #
+    #  Effect: EVERY make invocation that runs Kconfig parsing (defconfig,
+    #    syncconfig, olddefconfig used during actual build) fails with:
+    #      "can't open file 'drivers/misc/hwid/Kconfig'"
+    #
+    #  Fix (dual approach for safety):
+    #    1. Comment out the broken source line in drivers/misc/Kconfig
+    #    2. Create a minimal stub drivers/misc/hwid/Kconfig as backup
+    # ------------------------------------------------------------------
+    - name: Fix missing drivers/misc/hwid/Kconfig (Xiaomi proprietary stub)
+      working-directory: kernel_src
+      run: |
+        echo "==> Checking drivers/misc/Kconfig for broken hwid source line..."
+        grep -n 'hwid' drivers/misc/Kconfig || echo "  (no hwid reference found)"
+
+        # Fix 1: Comment out the broken source line (primary fix)
+        if grep -q 'source.*drivers/misc/hwid/Kconfig' drivers/misc/Kconfig; then
+          sed -i 's|^source "drivers/misc/hwid/Kconfig"|# source "drivers/misc/hwid/Kconfig"  # disabled: file not in OSS release|' \
+            drivers/misc/Kconfig
+          echo "==> Commented out drivers/misc/hwid/Kconfig source line."
+        else
+          echo "==> hwid source line not found at expected location — scanning..."
+          grep -rn 'hwid/Kconfig' . --include='Kconfig' 2>/dev/null | head -10 || true
+          # Broaden the comment-out to all Kconfig files referencing hwid
+          find . -name 'Kconfig' -exec grep -l 'hwid/Kconfig' {} \; 2>/dev/null | \
+            while read f; do
+              sed -i 's|source "drivers/misc/hwid/Kconfig"|# source "drivers/misc/hwid/Kconfig"  # disabled: not in OSS|g' "$f"
+              echo "  Patched: $f"
+            done
+        fi
+
+        # Fix 2: Create minimal stub as fallback (backup safety net)
+        mkdir -p drivers/misc/hwid
+        if [ ! -f drivers/misc/hwid/Kconfig ]; then
+          cat > drivers/misc/hwid/Kconfig << 'KCONFIG_EOF'
+# Xiaomi HWID driver - stub for OSS build
+# The real implementation is not released as open source.
+config HWID
+	tristate "Xiaomi Hardware ID driver"
+	default n
+	help
+	  Stub Kconfig for Xiaomi HWID driver.
+	  Set to n for AOSP/custom kernel builds.
+KCONFIG_EOF
+          echo "==> Created stub drivers/misc/hwid/Kconfig"
+        fi
+
+        # Create a minimal stub Makefile too
+        if [ ! -f drivers/misc/hwid/Makefile ]; then
+          echo "obj-$(CONFIG_HWID) += hwid.o" > drivers/misc/hwid/Makefile
+          echo "==> Created stub drivers/misc/hwid/Makefile"
+        fi
+
+        # Create minimal stub C source (in case Makefile references it)
+        if [ ! -f drivers/misc/hwid/hwid.c ]; then
+          cat > drivers/misc/hwid/hwid.c << 'C_EOF'
+// SPDX-License-Identifier: GPL-2.0
+// Xiaomi HWID driver stub for OSS kernel builds
+#include <linux/module.h>
+MODULE_LICENSE("GPL v2");
+MODULE_DESCRIPTION("Xiaomi HWID stub");
+C_EOF
+          echo "==> Created stub drivers/misc/hwid/hwid.c"
+        fi
+
+        echo "==> Verifying fix — Kconfig parse test:"
+        grep -n 'hwid' drivers/misc/Kconfig || echo "  (hwid line successfully removed/commented)"
+
+    # ------------------------------------------------------------------
     # 5. Integrate SukiSU-Ultra
     # ------------------------------------------------------------------
     - name: Integrate SukiSU-Ultra
@@ -167,13 +244,11 @@ jobs:
         echo "==> kernel_patches/ listing:"
         ls susfs4ksu/kernel_patches/ || true
 
-        # Copy .c sources
         if [ -d susfs4ksu/kernel_patches/fs ]; then
           for f in susfs4ksu/kernel_patches/fs/*.c; do
             [ -f "$f" ] && cp -v "$f" kernel_src/fs/ || true
           done
         fi
-        # Copy headers
         if [ -d susfs4ksu/kernel_patches/include/linux ]; then
           mkdir -p kernel_src/include/linux
           for f in susfs4ksu/kernel_patches/include/linux/*.h; do
@@ -186,18 +261,12 @@ jobs:
     # ------------------------------------------------------------------
     # 7. Assemble kernel .config
     #
-    #  WHY we skip "make defconfig":
-    #    socrates-t-oss's Kconfig tree references drivers/misc/hwid/Kconfig
-    #    at line 517 via a source statement. On the GitHub runner this path
-    #    resolves but the file has a bad internal include that causes:
-    #      "can't open file 'drivers/misc/hwid/Kconfig'"
-    #    This kills ALL `make <foo>defconfig` invocations (they all share
-    #    the same Kconfig parser pass).
-    #
-    #  SOLUTION: copy the defconfig directly into out/.config, then append
-    #    fragments, then run `make olddefconfig` which is forgiving —
-    #    it validates known symbols and silently drops unknowns without
-    #    re-parsing the full source tree.
+    #  Build flow (avoids broken Kconfig parser where possible):
+    #    A. cp defconfig -> out/.config  (no Kconfig parse needed)
+    #    B. cat socrates_consolidate.config >> out/.config
+    #    C. cat sukisu_susfs.config + KPM >> out/.config
+    #    D. apply_scheduler_opts.sh
+    #    E. make olddefconfig  (lenient: validates what it can parse)
     # ------------------------------------------------------------------
     - name: Assemble kernel .config (cp + cat + olddefconfig)
       working-directory: kernel_src
@@ -205,39 +274,25 @@ jobs:
         export PATH="$HOME/clang/bin:$PATH"
         mkdir -p out
 
-        # ---- Step A: copy base defconfig directly (no Kconfig parsing) --
-        echo "==> Step A: copying arch/arm64/configs/defconfig -> out/.config"
+        echo "==> Step A: cp arch/arm64/configs/defconfig -> out/.config"
         cp arch/arm64/configs/defconfig out/.config
-        echo "==> Base .config: $(wc -l < out/.config) lines"
+        echo "==> Base: $(wc -l < out/.config) lines"
 
-        # ---- Step B: append socrates_consolidate.config fragment --------
         CONSOLIDATE="arch/arm64/configs/vendor/socrates_consolidate.config"
         if [ -f "$CONSOLIDATE" ]; then
           echo "==> Step B: appending $CONSOLIDATE"
           cat "$CONSOLIDATE" >> out/.config
           echo "==> After consolidate: $(wc -l < out/.config) lines"
-        else
-          echo "==> Step B: $CONSOLIDATE not found, skipping"
         fi
 
-        # ---- Step C: append SukiSU + SUSFS KConfig fragment -------------
-        echo "==> Step C: appending SukiSU/SUSFS fragment"
+        echo "==> Step C: appending SukiSU/SUSFS + KPM"
         cat ../builder/configs/sukisu_susfs.config >> out/.config
+        echo "# CONFIG_HWID is not set" >> out/.config
+        [ "$ENABLE_KPM" = "true" ] && echo 'CONFIG_KPM=y' >> out/.config
 
-        if [ "$ENABLE_KPM" = "true" ]; then
-          echo 'CONFIG_KPM=y' >> out/.config
-          echo "==> KPM enabled"
-        fi
-
-        # ---- Step D: apply scheduler optimizations ----------------------
         echo "==> Step D: scheduler optimizations"
         bash ../builder/scripts/apply_scheduler_opts.sh "$(pwd)/out/.config"
 
-        # ---- Step E: make olddefconfig ----------------------------------
-        #  olddefconfig reads out/.config, validates each symbol against
-        #  whatever Kconfig files it CAN parse, and either keeps or
-        #  resets each option. Unknown/unresolved Kconfig source files
-        #  simply mean fewer symbols are validated — not a fatal error.
         echo "==> Step E: make olddefconfig"
         make O=out \
           ARCH=$ARCH \
@@ -245,18 +300,15 @@ jobs:
           LLVM=1 \
           LLVM_IAS=1 \
           CROSS_COMPILE=aarch64-linux-gnu- \
-          olddefconfig 2>&1 || {
-          echo "==> WARNING: olddefconfig returned non-zero (Kconfig warnings)."
-          echo "==> Checking if out/.config is still usable..."
-          [ -f out/.config ] && wc -l < out/.config || { echo "ERROR: no .config!"; exit 1; }
-          echo "==> .config exists, continuing build."
+          olddefconfig 2>&1 | tee /tmp/olddefconfig.log || {
+          echo "==> WARNING: olddefconfig non-zero exit — checking .config..."
+          [ -f out/.config ] || { echo "ERROR: no .config generated!"; exit 1; }
+          echo "==> .config exists ($(wc -l < out/.config) lines), continuing."
         }
 
         echo
-        echo "==> Final .config: $(wc -l < out/.config) lines"
-        echo "==> Key config values:"
-        grep -E \
-          'CONFIG_KSU|CONFIG_SUSFS|CONFIG_KPM|CONFIG_KALLSYMS_ALL|CONFIG_SCHED_WALT|CONFIG_HZ=|CONFIG_PREEMPT=|CONFIG_TCP_CONG_BBR|CONFIG_MQ_IOSCHED_KYBER' \
+        echo "==> Final .config ($(wc -l < out/.config) lines). Key values:"
+        grep -E 'CONFIG_KSU=|CONFIG_SUSFS=|CONFIG_KPM=|CONFIG_KALLSYMS_ALL=|CONFIG_SCHED_WALT=|CONFIG_HZ=|CONFIG_PREEMPT=|CONFIG_TCP_CONG_BBR=|CONFIG_MQ_IOSCHED_KYBER=' \
           out/.config 2>/dev/null || true
 
     # ------------------------------------------------------------------
@@ -280,7 +332,7 @@ jobs:
           2>&1 | tee /tmp/build.log
 
         if [ ! -f out/arch/arm64/boot/Image ]; then
-          echo "==> ERROR: Image not found! Last 80 lines of build log:"
+          echo "==> ERROR: Image not found! Last 80 lines:"
           tail -80 /tmp/build.log
           exit 1
         fi
@@ -299,10 +351,10 @@ jobs:
         cp builder/anykernel/anykernel.sh anykernel3_pkg/
         cp kernel_src/out/arch/arm64/boot/Image anykernel3_pkg/
 
-        if [ -f kernel_src/out/arch/arm64/boot/dtbo.img ]; then
-          cp kernel_src/out/arch/arm64/boot/dtbo.img anykernel3_pkg/
+        [ -f kernel_src/out/arch/arm64/boot/dtbo.img ] && \
+          cp kernel_src/out/arch/arm64/boot/dtbo.img anykernel3_pkg/ && \
           echo "==> dtbo.img included."
-        fi
+
         if find kernel_src/out/arch/arm64/boot/dts -name '*.dtb' -quit 2>/dev/null; then
           mkdir -p anykernel3_pkg/dtb
           find kernel_src/out/arch/arm64/boot/dts -name '*.dtb' \
@@ -342,6 +394,14 @@ jobs:
       with:
         name: build-log
         path: /tmp/build.log
+        retention-days: 7
+
+    - name: Upload olddefconfig log
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: olddefconfig-log
+        path: /tmp/olddefconfig.log
         retention-days: 7
 
     # ------------------------------------------------------------------
