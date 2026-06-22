@@ -61,7 +61,7 @@ echo "[1/4] Locating main SUSFS VFS patch..."
 
 MAIN_PATCH=""
 while IFS= read -r f; do
-  case "$f" in
+  case "$(basename "$f")" in
     *KernelSU*|*ksu*|*10_enable*) continue ;;
   esac
   MAIN_PATCH="$f"
