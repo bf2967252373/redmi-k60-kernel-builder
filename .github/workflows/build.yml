@@ -1,0 +1,64 @@
+name: Kernel Build
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      kernel_url:
+        description: 'Kernel Source URL'
+        required: true
+        default: 'https://github.com/example/socrates-kernel'
+      susfs_url:
+        description: 'SUSFS Source URL'
+        required: true
+        default: 'https://github.com/ example/susfs4ksu'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Builder
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc build-essential flex bison libssl-dev libelf-dev
+          # Install Clang/LLVM for Android Kernel
+          sudo apt-get install -y clang llvm
+
+      - name: Setup Directories
+        run: |
+          mkdir -p build_env
+          # Using input or secret for URLs
+          KERNEL_URL="${{ github.event.inputs.kernel_url || secrets.KERNEL_URL }}"
+          SUSFS_URL="${{ github.event.inputs.susfs_url || secrets.SUSFS_URL }}"
+
+          echo "Cloning Kernel..."
+          git clone "$KERNEL_URL" build_env/kernel
+          echo "Cloning SUSFS..."
+          git clone "$SUSFS_URL" build_env/susfs
+
+      - name: Prepare Kernel
+        run: |
+          # Execute the fixed build.sh
+          bash build.sh build_env/kernel build_env/susfs
+
+      - name: Build Kernel
+        run: |
+          cd build_env/kernel
+          # This is a template. The actual build commands depend on the specific kernel.
+          # Typically:
+          # make O=out ARCH=arm64 CROSS_COMPILE=... defconfig
+          # bash ../../scripts/apply_scheduler_opts.sh out/.config
+          # make O=out ARCH=arm64 CROSS_COMPILE=... -j$(nproc)
+          echo "Starting compilation... (Detailed make commands would go here)"
+          # Since I don't have the exact toolchain paths for this specific kernel,
+          # I'm providing the structure. In a real scenario, we'd use a toolchain action.
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-binaries
+          path: build_env/kernel/out/arch/arm64/boot/Image.gz
