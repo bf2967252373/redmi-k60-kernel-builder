@@ -72,7 +72,7 @@ if [ -n "$MAIN_PATCH" ]; then
   echo "  [FOUND] $MAIN_PATCH"
   apply_patch "$MAIN_PATCH" "SUSFS main VFS patch" || exit 1
 else
-  echo "  [ERROR] No 50_add_susfs_in_*.patch found in $SUSFS_DIR/kernel_patches/"
+  echo "!!! BUILD_ERROR_SUSFS_NOT_FOUND !!! No 50_add_susfs_in_*.patch found in $SUSFS_DIR/kernel_patches/"
   exit 1
 fi
 
