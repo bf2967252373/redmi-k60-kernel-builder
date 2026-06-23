@@ -60,19 +60,25 @@ echo
 echo "[1/4] Locating main SUSFS VFS patch..."
 
 MAIN_PATCH=""
-while IFS= read -r f; do
-  case "$(basename "$f")" in
+# Use Bash globbing instead of 'find' to avoid path/filtering issues in CI environments
+for f in "$SUSFS_DIR"/kernel_patches/50_add_susfs_in_*.patch; do
+  [ -e "$f" ] || continue # Handle case where no files match glob
+
+  # Filter out KSU specific patches by filename
+  filename=$(basename "$f")
+  case "$filename" in
     *KernelSU*|*ksu*|*10_enable*) continue ;;
   esac
+
   MAIN_PATCH="$f"
   break
-done < <(find "$SUSFS_DIR/kernel_patches" -maxdepth 1 -name '50_add_susfs_in_*.patch' 2>/dev/null | sort)
+done
 
 if [ -n "$MAIN_PATCH" ]; then
   echo "  [FOUND] $MAIN_PATCH"
   apply_patch "$MAIN_PATCH" "SUSFS main VFS patch" || exit 1
 else
-  echo "!!! BUILD_ERROR_SUSFS_NOT_FOUND !!! No 50_add_susfs_in_*.patch found in $SUSFS_DIR/kernel_patches/"
+  echo "  [ERROR] No 50_add_susfs_in_*.patch found in $SUSFS_DIR/kernel_patches/"
   exit 1
 fi
 
@@ -83,19 +89,24 @@ echo
 echo "[2/4] Locating KernelSU-side SUSFS patch..."
 
 KSU_PATCH=""
-KSU_PATCH_CANDIDATE=$(find "$SUSFS_DIR/kernel_patches/KernelSU" \
-  -name '*.patch' 2>/dev/null | sort | head -1)
-if [ -n "$KSU_PATCH_CANDIDATE" ]; then
-  KSU_PATCH="$KSU_PATCH_CANDIDATE"
-else
-  KSU_PATCH=$(find "$SUSFS_DIR/kernel_patches" -maxdepth 1 \
-    -name 'add_susfs_in_ksu*.patch' 2>/dev/null | sort | head -1)
+# Try specific subdirectory first
+for f in "$SUSFS_DIR"/kernel_patches/KernelSU/*.patch; do
+  [ -e "$f" ] || continue
+  KSU_PATCH="$f"
+  break
+done
+
+# Fallback to top-level pattern
+if [ -z "$KSU_PATCH" ]; then
+  for f in "$SUSFS_DIR"/kernel_patches/add_susfs_in_ksu*.patch; do
+    [ -e "$f" ] || continue
+    KSU_PATCH="$f"
+    break
+  done
 fi
 
 if [ -n "$KSU_PATCH" ]; then
   echo "  [FOUND] $KSU_PATCH"
-  # Apply from root. If the patch is designed for the KernelSU/ subdir,
-  # patch -p1 from root will work if paths are 'a/KernelSU/...'
   apply_patch "$KSU_PATCH" "KSU-side SUSFS patch" || exit 1
 else
   echo "  [INFO] No KernelSU-side patch found (likely already integrated in SukiSU-Ultra)"
