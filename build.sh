@@ -44,7 +44,22 @@ log "SUSFS Source : $SUSFS_DIR"
 # 2. Kernel Version Validation
 log "Validating kernel version..."
 MAKEFILE="$KERNEL_DIR/Makefile"
-[ -f "$MAKEFILE" ] || error "Kernel Makefile not found at $MAKEFILE"
+
+# Auto-discovery: if Makefile not in root, search first-level subdirs
+if [ ! -f "$MAKEFILE" ]; then
+  warn "Makefile not found in root, searching subdirectories..."
+  # Find the first directory containing a Makefile
+  FOUND_MAKEFILE=$(find "$KERNEL_DIR" -maxdepth 2 -name "Makefile" | head -n 1)
+  if [ -n "$FOUND_MAKEFILE" ]; then
+    log "Found Makefile at: $FOUND_MAKEFILE"
+    # Update KERNEL_DIR to the location of the Makefile
+    KERNEL_DIR=$(dirname "$FOUND_MAKEFILE")
+    MAKEFILE="$FOUND_MAKEFILE"
+  else
+    error "Kernel Makefile not found in $KERNEL_DIR or its subdirectories."
+  fi
+fi
+
 
 # Extract VERSION and PATCHLEVEL
 K_VER=$(grep '^VERSION[ \t]*=[ \t]*' "$MAKEFILE" | awk '{print $3}')
