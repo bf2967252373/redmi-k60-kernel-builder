@@ -8,11 +8,19 @@ on:
       kernel_url:
         description: 'Kernel Source URL'
         required: true
-        default: 'https://github.com/example/socrates-kernel'
+        default: 'https://github.com/MiCode/Xiaomi_Kernel_OpenSource'
+      kernel_branch:
+        description: 'Kernel Branch'
+        required: true
+        default: 'socrates-t-oss'
       susfs_url:
         description: 'SUSFS Source URL'
         required: true
-        default: 'https://github.com/ example/susfs4ksu'
+        default: 'https://gitlab.com/simonpunk/susfs4ksu.git'
+      susfs_branch:
+        description: 'SUSFS Branch'
+        required: true
+        default: 'gki-android13-5.10'
 
 jobs:
   build:
@@ -25,37 +33,31 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y bc build-essential flex bison libssl-dev libelf-dev
-          # Install Clang/LLVM for Android Kernel
           sudo apt-get install -y clang llvm
 
       - name: Setup Directories
         run: |
           mkdir -p build_env
-          # Using input or secret for URLs
-          KERNEL_URL="${{ github.event.inputs.kernel_url || secrets.KERNEL_URL }}"
-          SUSFS_URL="${{ github.event.inputs.susfs_url || secrets.SUSFS_URL }}"
 
-          echo "Cloning Kernel..."
-          git clone "$KERNEL_URL" build_env/kernel
-          echo "Cloning SUSFS..."
-          git clone "$SUSFS_URL" build_env/susfs
+          KERNEL_URL="${{ github.event.inputs.kernel_url || secrets.KERNEL_URL }}"
+          KERNEL_BRANCH="${{ github.event.inputs.kernel_branch || 'main' }}"
+          SUSFS_URL="${{ github.event.inputs.susfs_url || secrets.SUSFS_URL }}"
+          SUSFS_BRANCH="${{ github.event.inputs.susfs_branch || 'main' }}"
+
+          echo "Cloning Kernel (Branch: $KERNEL_BRANCH)..."
+          git clone -b "$KERNEL_BRANCH" --depth=1 "$KERNEL_URL" build_env/kernel
+
+          echo "Cloning SUSFS (Branch: $SUSFS_BRANCH)..."
+          git clone -b "$SUSFS_BRANCH" --depth=1 "$SUSFS_URL" build_env/susfs
 
       - name: Prepare Kernel
         run: |
-          # Execute the fixed build.sh
           bash build.sh build_env/kernel build_env/susfs
 
       - name: Build Kernel
         run: |
           cd build_env/kernel
-          # This is a template. The actual build commands depend on the specific kernel.
-          # Typically:
-          # make O=out ARCH=arm64 CROSS_COMPILE=... defconfig
-          # bash ../../scripts/apply_scheduler_opts.sh out/.config
-          # make O=out ARCH=arm64 CROSS_COMPILE=... -j$(nproc)
           echo "Starting compilation... (Detailed make commands would go here)"
-          # Since I don't have the exact toolchain paths for this specific kernel,
-          # I'm providing the structure. In a real scenario, we'd use a toolchain action.
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
