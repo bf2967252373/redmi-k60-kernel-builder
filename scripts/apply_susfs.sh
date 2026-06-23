@@ -60,7 +60,7 @@ echo
 echo "[1/4] Locating main SUSFS VFS patch..."
 
 MAIN_PATCH=""
-# Use Bash globbing instead of 'find' to avoid path/filtering issues in CI environments
+# Search for any file matching 50_add_susfs_in_*.patch in kernel_patches/
 for f in "$SUSFS_DIR"/kernel_patches/50_add_susfs_in_*.patch; do
   [ -e "$f" ] || continue # Handle case where no files match glob
 

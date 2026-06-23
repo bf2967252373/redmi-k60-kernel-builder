@@ -56,6 +56,9 @@ if [ ! -f "$MAKEFILE" ]; then
     KERNEL_DIR=$(dirname "$FOUND_MAKEFILE")
     MAKEFILE="$FOUND_MAKEFILE"
   else
+    echo "--- DEBUG: DIRECTORY SNAPSHOT ---"
+    ls -R "$KERNEL_DIR"
+    echo "----------------------------------"
     error "Kernel Makefile not found in $KERNEL_DIR or its subdirectories."
   fi
 fi
@@ -65,10 +68,10 @@ fi
 K_VER=$(grep '^VERSION[ \t]*=[ \t]*' "$MAKEFILE" | awk '{print $3}')
 K_PATCH=$(grep '^PATCHLEVEL[ \t]*=[ \t]*' "$MAKEFILE" | awk '{print $3}')
 
-if [[ "$K_VER" != "5" || "$K_PATCH" != "10" ]]; then
-  error "Unsupported kernel version: $K_VER.$K_PATCH. This builder is designed for 5.10."
+if [[ "$K_VER" != "5" || ( "$K_PATCH" != "10" && "$K_PATCH" != "15" ) ]]; then
+  error "Unsupported kernel version: $K_VER.$K_PATCH. This builder is designed for 5.10 or 5.15."
 fi
-log "Kernel version 5.10 verified."
+log "Kernel version $K_VER.$K_PATCH verified."
 
 # 3. Apply SUSFS Patches
 log "Applying SUSFS patches..."
