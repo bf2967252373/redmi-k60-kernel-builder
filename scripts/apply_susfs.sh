@@ -1,19 +1,21 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# apply_susfs.sh  —  Apply SUSFS patches to a 5.10 non-GKI
+# apply_susfs.sh  —  Apply SUSFS patches to a 5.10/5.15 non-GKI
 #                    Xiaomi kernel (socrates / SM8475)
 #
-# Usage: bash apply_susfs.sh <kernel_src_dir> <susfs4ksu_dir>
+# Usage: bash apply_susfs.sh <kernel_src_dir> <susfs4ksu_dir> [kernel_version]
 # ==============================================================================
 set -uo pipefail
 
 KERNEL_DIR="${1:?Kernel source dir required}"
 SUSFS_DIR="${2:?SUSFS dir required}"
+KVER="${3:-5.10}" # Default to 5.10 if not provided
 
 echo "========================================"
 echo " SUSFS Patch Applier (Strict Mode)"
 echo " Kernel : $KERNEL_DIR"
 echo " SUSFS  : $SUSFS_DIR"
+echo " Target Version: $KVER"
 echo "========================================"
 
 cd "$KERNEL_DIR"
@@ -33,7 +35,6 @@ apply_patch() {
   echo "  [PATCH] Applying: $desc"
 
   # Perform the patch. We do NOT use '|| true' here.
-  # We capture stderr to stdout for logging.
   if patch -p1 --forward --no-backup-if-mismatch < "$patch_file" 2>&1; then
     echo "  [OK]    $desc applied successfully."
   else
@@ -41,7 +42,6 @@ apply_patch() {
     return 1
   fi
 
-  # Check for .rej files which indicate partial failure/conflicts
   local rej_count
   rej_count=$(find . -name '*.rej' 2>/dev/null | wc -l)
   if [ "$rej_count" -gt 0 ]; then
@@ -60,25 +60,36 @@ echo
 echo "[1/4] Locating main SUSFS VFS patch..."
 
 MAIN_PATCH=""
-# Search for any file matching 50_add_susfs_in_*.patch in kernel_patches/
-for f in "$SUSFS_DIR"/kernel_patches/50_add_susfs_in_*.patch; do
-  [ -e "$f" ] || continue # Handle case where no files match glob
-
-  # Filter out KSU specific patches by filename
+# Priority 1: Look for a patch that explicitly matches the kernel version (e.g., 5.10 or 5.15)
+for f in "$SUSFS_DIR"/kernel_patches/50_add_susfs_in_*${KVER}*.patch; do
+  [ -e "$f" ] || continue
   filename=$(basename "$f")
   case "$filename" in
     *KernelSU*|*ksu*|*10_enable*) continue ;;
   esac
-
   MAIN_PATCH="$f"
   break
 done
+
+# Priority 2: Fallback to any matching patch if version-specific one isn't found
+if [ -z "$MAIN_PATCH" ]; then
+  echo "  [INFO] No specific patch for $KVER found, trying generic 50_add_susfs_in_*.patch..."
+  for f in "$SUSFS_DIR"/kernel_patches/50_add_susfs_in_*.patch; do
+    [ -e "$f" ] || continue
+    filename=$(basename "$f")
+    case "$filename" in
+      *KernelSU*|*ksu*|*10_enable*) continue ;;
+    esac
+    MAIN_PATCH="$f"
+    break
+  done
+fi
 
 if [ -n "$MAIN_PATCH" ]; then
   echo "  [FOUND] $MAIN_PATCH"
   apply_patch "$MAIN_PATCH" "SUSFS main VFS patch" || exit 1
 else
-  echo "  [ERROR] No 50_add_susfs_in_*.patch found in $SUSFS_DIR/kernel_patches/"
+  echo "  [ERROR] No suitable 50_add_susfs_in_*.patch found in $SUSFS_DIR/kernel_patches/"
   exit 1
 fi
 
@@ -89,14 +100,12 @@ echo
 echo "[2/4] Locating KernelSU-side SUSFS patch..."
 
 KSU_PATCH=""
-# Try specific subdirectory first
 for f in "$SUSFS_DIR"/kernel_patches/KernelSU/*.patch; do
   [ -e "$f" ] || continue
   KSU_PATCH="$f"
   break
 done
 
-# Fallback to top-level pattern
 if [ -z "$KSU_PATCH" ]; then
   for f in "$SUSFS_DIR"/kernel_patches/add_susfs_in_ksu*.patch; do
     [ -e "$f" ] || continue
@@ -120,7 +129,6 @@ echo "[3/4] Patching fs/Makefile for SUSFS sources..."
 
 FS_MAKEFILE="fs/Makefile"
 if [ -f "$FS_MAKEFILE" ]; then
-  # Ensure the file ends with a newline before appending
   if [ -n "$(tail -c 1 "$FS_MAKEFILE")" ]; then
     echo "" >> "$FS_MAKEFILE"
   fi

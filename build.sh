@@ -75,8 +75,8 @@ log "Kernel version $K_VER.$K_PATCH verified."
 
 # 3. Apply SUSFS Patches
 log "Applying SUSFS patches..."
-# We use absolute paths to avoid CWD confusion
-bash "scripts/apply_susfs.sh" "$KERNEL_DIR" "$SUSFS_DIR"
+# We use absolute paths and pass the detected version to help patch selection
+bash "scripts/apply_susfs.sh" "$KERNEL_DIR" "$SUSFS_DIR" "$K_VER.$K_PATCH"
 
 # 4. Patch Android Vendor Header
 log "Patching android_vendor.h..."
