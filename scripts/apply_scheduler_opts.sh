@@ -13,10 +13,10 @@
 # by olddefconfig, so we just warn and continue.
 set -uo pipefail
 
-CONFIG_FILE="${1:?Usage: apply_scheduler_opts.sh <out/.config path>}"
+CONFIG_FILE="${1:-}"
 
 if [ ! -f "$CONFIG_FILE" ]; then
-  echo "[ERROR] Config file not found: $CONFIG_FILE"
+  echo "[ERROR] Config file not found: ${CONFIG_FILE:-<no argument provided>}"
   exit 1
 fi
 
@@ -40,7 +40,7 @@ set_config() {
     full_val="${key}=${val}"
   fi
 
-  # Remove any existing entry for this key (both =y and # ... is not set forms)
+  # Remove any existing entry for this key (both =val and # ... is not set forms)
   sed -i "/^${key}=/d; /^# ${key} is not set/d" "$CONFIG_FILE"
   echo "$full_val" >> "$CONFIG_FILE"
   echo "  [SET] $full_val"

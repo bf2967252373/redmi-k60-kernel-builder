@@ -39,10 +39,10 @@ jobs:
         run: |
           mkdir -p build_env
 
-          KERNEL_URL="${{ github.event.inputs.kernel_url || secrets.KERNEL_URL }}"
-          KERNEL_BRANCH="${{ github.event.inputs.kernel_branch || 'main' }}"
-          SUSFS_URL="${{ github.event.inputs.susfs_url || secrets.SUSFS_URL }}"
-          SUSFS_BRANCH="${{ github.event.inputs.susfs_branch || 'main' }}"
+          KERNEL_URL="${{ github.event.inputs.kernel_url || 'https://github.com/MiCode/Xiaomi_Kernel_OpenSource' }}"
+          KERNEL_BRANCH="${{ github.event.inputs.kernel_branch || 'socrates-t-oss' }}"
+          SUSFS_URL="${{ github.event.inputs.susfs_url || 'https://gitlab.com/simonpunk/susfs4ksu.git' }}"
+          SUSFS_BRANCH="${{ github.event.inputs.susfs_branch || 'gki-android13-5.10' }}"
 
           echo "Cloning Kernel (Branch: $KERNEL_BRANCH)..."
           git clone -b "$KERNEL_BRANCH" --depth=1 "$KERNEL_URL" build_env/kernel
@@ -63,4 +63,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: kernel-binaries
-          path: build_env/kernel/out/arch/arm64/boot/Image.gz
+          path: build_env/kernel/out/arch/arm64/boot/Image
