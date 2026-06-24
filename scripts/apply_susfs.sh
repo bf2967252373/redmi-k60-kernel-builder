@@ -7,8 +7,8 @@
 # ==============================================================================
 set -uo pipefail
 
-KERNEL_DIR="${1:?Kernel source dir required}"
-SUSFS_DIR="${2:?SUSFS dir required}"
+KERNEL_DIR="${1:?'kernel_src_dir is required as first argument'}"
+SUSFS_DIR="${2:?'susfs4ksu_dir is required as second argument'}"
 KVER="${3:-5.10}" # Default to 5.10 if not provided
 
 echo "========================================"
@@ -25,7 +25,7 @@ cd "$KERNEL_DIR"
 # ----------------------------------------------------------------
 apply_patch() {
   local patch_file="$1"
-  local desc="${2:-$(basename "$patch_file")}"
+  local desc="${2:-$patch_file}"
 
   if [ ! -f "$patch_file" ]; then
     echo "  [ERROR] Patch file not found: $patch_file"
@@ -54,7 +54,7 @@ echo
 echo "[1/4] Locating main SUSFS VFS patch..."
 
 MAIN_PATCH=""
-for f in "$SUSFS_DIR"/kernel_patches/50_add_susfs_in_*${KVER}*.patch; do
+for f in "$SUSFS_DIR"/kernel_patches/50_add_susfs_in_*.patch; do
   [ -e "$f" ] || continue
   filename=$(basename "$f")
   case "$filename" in

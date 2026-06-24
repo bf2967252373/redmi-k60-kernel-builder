@@ -289,7 +289,7 @@ jobs:
         fi
         TIMESTAMP=$(date +%Y%m%d_%H%M)
         SUKISU_VER=$(cat kernel_src/KernelSU/version 2>/dev/null | tr -d '\n' || echo 'unknown')
-        ZIP_NAME="Socrates_SukiSU_${SUKISU_VER}_SUSFS_${TIMESTAMP}.zip"
+        ZIP_NAME="Socrates_SukiSU-${SUKISU_VER}_SUSFS_${TIMESTAMP}.zip"
         cd anykernel3_pkg && zip -r9 "../$ZIP_NAME" . -x '*.git*' -x '*README*'
         cd ..
         echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
@@ -342,7 +342,7 @@ jobs:
         echo "  SUSFS   : $SUSFS_BRANCH"
         echo "  KPM     : $ENABLE_KPM"
         echo "  Clang   : ${CLANG_SOURCE:-unknown}"
-        echo "  Zip     : ${ZIP_NAME:-N/A}"
+        echo "  Zip     : ${ZIP_NAME:-none}"
         if [ -f kernel_src/out/arch/arm64/boot/Image ]; then
           echo "  Size    : $(du -sh kernel_src/out/arch/arm64/boot/Image | cut -f1)"
           echo "  STATUS  : SUCCESS"
