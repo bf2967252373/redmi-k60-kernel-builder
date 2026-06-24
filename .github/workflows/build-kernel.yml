@@ -20,9 +20,9 @@ on:
         required: true
         default: 'susfs-main'
       SUSFS_BRANCH:
-        description: 'SUSFS kernel branch'
+        description: 'SUSFS kernel branch (use gki-android13-5.15 for kernel 5.15)'
         required: true
-        default: 'gki-android13-5.10'
+        default: 'gki-android13-5.15'
       ENABLE_KPM:
         description: 'Enable KPM support'
         required: false
@@ -34,7 +34,8 @@ env:
   SUKISU_REPO: https://github.com/SukiSU-Ultra/SukiSU-Ultra
   SUKISU_REF: ${{ github.event.inputs.SUKISU_REF || 'susfs-main' }}
   SUSFS_REPO: https://gitlab.com/simonpunk/susfs4ksu.git
-  SUSFS_BRANCH: ${{ github.event.inputs.SUSFS_BRANCH || 'gki-android13-5.10' }}
+  # socrates-t-oss is kernel 5.15 — use the matching SUSFS branch
+  SUSFS_BRANCH: ${{ github.event.inputs.SUSFS_BRANCH || 'gki-android13-5.15' }}
   AOSP_CLANG_VER: r522817
   ARCH: arm64
   JOBS: 4
@@ -153,11 +154,6 @@ jobs:
 
     # ------------------------------------------------------------------
     # 4c. Patch android_vendor.h to enable vendor data fields unconditionally
-    #
-    # Uses an external Python script (no heredoc in YAML).
-    # Dual safety: the script edits the header file, AND we pass
-    # KCPPFLAGS=-DCONFIG_ANDROID_VENDOR_OEM_DATA to every make invocation
-    # so the preprocessor sees it even if the script doesn't match.
     # ------------------------------------------------------------------
     - name: Patch android_vendor.h (enable vendor data unconditionally)
       working-directory: kernel_src
@@ -191,11 +187,17 @@ jobs:
 
     # ------------------------------------------------------------------
     # 6. Clone SUSFS and apply patches
+    #    apply_susfs.sh is now self-contained: it copies .c files AND
+    #    applies patches internally. The explicit copy below is kept as
+    #    a belt-and-suspenders pre-stage for any workflow ordering edge
+    #    cases, but apply_susfs.sh will skip already-present files.
     # ------------------------------------------------------------------
     - name: Clone SUSFS and apply patches
       run: |
         git clone --depth=1 --branch "$SUSFS_BRANCH" "$SUSFS_REPO" susfs4ksu
+        echo "==> SUSFS kernel_patches listing:"
         ls susfs4ksu/kernel_patches/ || true
+        # Pre-copy .c and .h files (apply_susfs.sh will skip if already done)
         if [ -d susfs4ksu/kernel_patches/fs ]; then
           for f in susfs4ksu/kernel_patches/fs/*.c; do
             [ -f "$f" ] && cp -v "$f" kernel_src/fs/ || true

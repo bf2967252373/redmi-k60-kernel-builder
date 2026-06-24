@@ -18,9 +18,10 @@ on:
         required: true
         default: 'https://gitlab.com/simonpunk/susfs4ksu.git'
       susfs_branch:
-        description: 'SUSFS Branch'
+        description: 'SUSFS Branch (use gki-android13-5.15 for kernel 5.15)'
         required: true
-        default: 'gki-android13-5.10'
+        # socrates-t-oss is kernel 5.15 — must match the kernel version
+        default: 'gki-android13-5.15'
 
 jobs:
   build:
@@ -42,7 +43,7 @@ jobs:
           KERNEL_URL="${{ github.event.inputs.kernel_url || 'https://github.com/MiCode/Xiaomi_Kernel_OpenSource' }}"
           KERNEL_BRANCH="${{ github.event.inputs.kernel_branch || 'socrates-t-oss' }}"
           SUSFS_URL="${{ github.event.inputs.susfs_url || 'https://gitlab.com/simonpunk/susfs4ksu.git' }}"
-          SUSFS_BRANCH="${{ github.event.inputs.susfs_branch || 'gki-android13-5.10' }}"
+          SUSFS_BRANCH="${{ github.event.inputs.susfs_branch || 'gki-android13-5.15' }}"
 
           echo "Cloning Kernel (Branch: $KERNEL_BRANCH)..."
           git clone -b "$KERNEL_BRANCH" --depth=1 "$KERNEL_URL" build_env/kernel
