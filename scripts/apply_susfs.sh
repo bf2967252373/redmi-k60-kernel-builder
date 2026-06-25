@@ -10,8 +10,8 @@
 # ==============================================================================
 set -uo pipefail
 
-KERNEL_DIR="${1:?'kernel_src_dir is required as first argument'}"
-SUSFS_DIR="${2:?'susfs4ksu_dir is required as second argument'}"
+KERNEL_DIR="$(realpath "${1:?'kernel_src_dir is required as first argument'}")"
+SUSFS_DIR="$(realpath "${2:?'susfs4ksu_dir is required as second argument'}")"
 KVER="${3:-5.15}"  # Default to 5.15 (socrates/SM8475)
 
 echo "========================================"
