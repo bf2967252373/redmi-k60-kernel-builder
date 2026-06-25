@@ -44,12 +44,12 @@ env:
   # The macro has no Kconfig entry in socrates-t-oss, so olddefconfig would
   # silently drop it if we tried CONFIG_ANDROID_VENDOR_OEM_DATA=y in .config.
   # Using KCPPFLAGS injects it at the C preprocessor level unconditionally.
-  VENDOR_CPPFLAG: "-DCONFIG_ANDROID_VENDOR_OEM_DATA"
+  VENDOR_CPPFLAG: "-DCONFIG_ANDROID_VENDOR_OEM_DATA -Di_user_ns\(x\)=\(\(x\)->i_sb->s_user_ns\)"
   # The SUSFS patch (designed for GKI kernels) introduces C99-style
   # mixed declarations in fs/notify/fdinfo.c. The kernel builds with
   # -Wdeclaration-after-statement which becomes a hard error with -Werror.
   # Suppress this specific warning for SUSFS compatibility.
-  VENDOR_CFLAGS: "-Wno-declaration-after-statement"
+  VENDOR_CFLAGS: "-Wno-declaration-after-statement -Wno-implicit-function-declaration -Wno-int-conversion"
 
 jobs:
   build:
