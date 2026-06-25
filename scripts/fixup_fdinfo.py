@@ -53,37 +53,21 @@ def fixup_fdinfo(kernel_dir: str) -> None:
     # Fix 2: Label followed by declaration
     #
     # Insert a null statement (";") after a label when the next
-    # non-empty line starts with a type declaration.
-    # Example:
-    #   some_label:
-    #       int x;        <-- error: declaration after label
-    # Becomes:
-    #   some_label: ;
-    #       int x;
+    # non-empty line starts with a type/variable declaration.
+    # Uses a regex replacement over the full content (not line-by-line)
+    # to avoid off-by-one issues with shifting line numbers.
     # ----------------------------------------------------------------
-    lines = content.splitlines(keepends=True)
-    new_lines = []
-    i = 0
-    while i < len(lines):
-        new_lines.append(lines[i])
-        # Match a label: whitespace + identifier + colon + possibly whitespace
-        m = re.match(r"^(\s*)([a-zA-Z_]\w*)\s*:\s*$", lines[i])
-        if m:
-            # Look at next non-blank line
-            j = i + 1
-            while j < len(lines) and lines[j].strip() == "":
-                j += 1
-            if j < len(lines):
-                # Check if next line is a declaration (starts with a type keyword)
-                next_line = lines[j].strip()
-                if re.match(
-                    r"^(int|long|short|char|void|u\d+|s\d+|unsigned|struct|const|bool|size_t|ssize_t|__\w+)\s+",
-                    next_line,
-                ) or re.match(r"^struct\s+\w+\s*\*?\s*\w+\s*;", next_line):
-                    new_lines.append(" ;\n")
-                    print(f"  [FIX] Inserted null statement after label '{m.group(2)}'")
-        i += 1
-    content = "".join(new_lines)
+    # Pattern: label at end of line, optional whitespace, then a
+    # declaration line starting with a type keyword or storage class.
+    count_before = content.count("\n")
+    content = re.sub(
+        r"(^[ \t]*[a-zA-Z_]\w*\s*:\s*$\n)(\s*)(?!\s*;)(?=\s*(?:int|long|short|char|void|u\d+|s\d+|unsigned|struct|const|bool|size_t|ssize_t|ssize_t|__\w+|static|extern|register|volatile|enum|union)\s+)",
+        r"\1 ;\n\2",
+        content,
+        flags=re.MULTILINE,
+    )
+    if content.count("\n") != count_before:
+        print("  [FIX] Fixed label-followed-by-declaration (C23 extension)")
 
     # ----------------------------------------------------------------
     # Fix 3: fanotify_fdinfo function signature
