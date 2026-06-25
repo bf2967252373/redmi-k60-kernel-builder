@@ -267,6 +267,16 @@ jobs:
         bash builder/scripts/apply_susfs.sh kernel_src susfs4ksu
 
     # ------------------------------------------------------------------
+    # 6b. Fixup fdinfo.c after SUSFS patching
+    #     The SUSFS patch may introduce clang-incompatible patterns in
+    #     fs/notify/fdinfo.c — fix them before compilation.
+    # ------------------------------------------------------------------
+    - name: Fixup fdinfo.c after SUSFS patching
+      working-directory: kernel_src
+      run: |
+        python3 ../builder/scripts/fixup_fdinfo.py .
+
+    # ------------------------------------------------------------------
     # 7. Assemble kernel .config
     # ------------------------------------------------------------------
     - name: Assemble kernel .config
