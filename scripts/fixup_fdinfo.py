@@ -52,17 +52,19 @@ def fixup_fdinfo(kernel_dir: str) -> None:
     # ----------------------------------------------------------------
     # Fix 2: Label followed by declaration
     #
-    # Insert a null statement (";") after a label when the next
-    # non-empty line starts with a type/variable declaration.
-    # Uses a regex replacement over the full content (not line-by-line)
-    # to avoid off-by-one issues with shifting line numbers.
+    # Insert a null statement (";") after every standalone label
+    # that is not already followed by ; or {.
+    #
+    # Clang with -Werror rejects labels immediately followed by a
+    # declaration (C23 extension). Adding ";" after the label
+    # satisfies the C standard requirement that labels precede
+    # statements. This is safe even for labels already followed by
+    # non-declaration code — a null statement is harmless.
     # ----------------------------------------------------------------
-    # Pattern: label at end of line, optional whitespace, then a
-    # declaration line starting with a type keyword or storage class.
     count_before = content.count("\n")
     content = re.sub(
-        r"(^[ \t]*[a-zA-Z_]\w*\s*:\s*$\n)(\s*)(?!\s*;)(?=\s*(?:int|long|short|char|void|u\d+|s\d+|unsigned|struct|const|bool|size_t|ssize_t|ssize_t|__\w+|static|extern|register|volatile|enum|union)\s+)",
-        r"\1 ;\n\2",
+        r"(^[ \t]*[a-zA-Z_]\w*:[ \t]*$\n)(?!\s*[;{])",
+        r"\1 ;\n",
         content,
         flags=re.MULTILINE,
     )
