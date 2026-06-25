@@ -54,7 +54,13 @@ set_config CONFIG_ENERGY_MODEL y
 
 echo
 echo "--- WALT (Window-Assisted Load Tracking) ---"
-set_config CONFIG_SCHED_WALT y
+# WALT requires Android vendor hooks (CONFIG_ANDROID_VENDOR_HOOKS) and
+# android_vendor_data1 in task_group — infrastructure that is not fully
+# available in the socrates-t-oss kernel. EAS (above) provides sufficient
+# scheduling optimization.
+# Force-disable to override any vendor defconfig that may enable it.
+set_config CONFIG_SCHED_WALT n
+echo "  [OK]   WALT disabled (requires GKI vendor hooks not present in OSS kernel)"
 
 echo
 echo "--- Preemption Model: Low-Latency Desktop ---"
