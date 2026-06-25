@@ -45,7 +45,7 @@ def fixup_fdinfo(kernel_dir: str) -> None:
             for m in re.finditer(r"^#include\s+.*$", content, re.MULTILINE):
                 last_include = m.end()
             if last_include:
-                fwd = "\n\n/* SUSFS: forward declaration */\nstatic u32 inotify_mark_user_mask(struct fsnotify_mark *mark);\n"
+                fwd = "\n\n/* SUSFS: forward declaration (defined in sus_path.c) */\nu32 inotify_mark_user_mask(struct fsnotify_mark *mark);\n"
                 content = content[:last_include] + fwd + content[last_include:]
                 print("  [FIX] Added inotify_mark_user_mask forward declaration")
 
